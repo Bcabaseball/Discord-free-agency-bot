@@ -1,0 +1,168 @@
+import discord
+from discord.ext import commands
+import random
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Each FA will have its own session stored by name
+free_agencies = {}
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+
+# -------------------------
+# 🧩 START A FREE AGENCY
+# -------------------------
+@bot.command()
+async def startFA(ctx, name: str, age: int):
+    """Start a new free agency session for a player."""
+    name_key = name.lower()
+
+    all_teams = [
+        "Yankees", "Dodgers", "Mets", "Red Sox", "Cubs", "Braves", "Giants",
+        "Cardinals", "Phillies", "Astros", "Mariners", "Rangers", "Padres",
+        "Blue Jays", "Brewers", "Orioles", "Guardians", "Twins", "Rays",
+        "Pirates", "Rockies", "White Sox", "Diamondbacks", "Reds", "Tigers",
+        "Marlins", "Royals", "Nationals", "Athletics", "Angels"
+    ]
+
+    favorites = random.sample(all_teams, 5)
+
+    free_agencies[name_key] = {
+        "name": name,
+        "age": age,
+        "offers": {},
+        "favorites": favorites
+    }
+
+    embed = discord.Embed(
+        title=f"⚾ Free Agency Started for {name} (Age {age})",
+        description=f"Favorites: **{', '.join(favorites)}**",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
+
+# -------------------------
+# 📄 SUBMIT AN OFFER
+# -------------------------
+@bot.command()
+async def offer(ctx, name: str, team: str, years: int, total_millions: int):
+    """Submit an offer to a specific FA."""
+    name_key = name.lower()
+
+    if name_key not in free_agencies:
+        await ctx.send(f"❌ No active free agency for **{name}**. Start one with `!startFA {name} <age>`.")
+        return
+
+    team = team.capitalize()
+    fa = free_agencies[name_key]
+    fa["offers"][team] = {
+        "years": years,
+        "total": total_millions
+    }
+
+    embed = discord.Embed(
+        title="📄 Offer Submitted",
+        description=f"{team} offered **{years} years / ${total_millions}M** to {fa['name']}.",
+        color=discord.Color.gold()
+    )
+    await ctx.send(embed=embed)
+
+# -------------------------
+# 🧮 SIMULATE THE DECISION
+# -------------------------
+@bot.command()
+async def simulate(ctx, name: str):
+    """Simulate the decision for a specific FA."""
+    name_key = name.lower()
+
+    if name_key not in free_agencies:
+        await ctx.send(f"❌ No active free agency for **{name}**.")
+        return
+
+    fa = free_agencies[name_key]
+    name = fa["name"]
+    age = fa["age"]
+    favorites = fa["favorites"]
+    offers = fa["offers"]
+
+    if not offers:
+        await ctx.send(f"❌ No offers yet for **{name}**.")
+        return
+
+    results = {}
+
+    for team, data in offers.items():
+        years = data["years"]
+        total = data["total"]
+        aav = total / years
+
+        # Base points
+        base = 20 if team in favorites else 10
+
+        if age <= 30:
+            # Younger FA weights
+            points = (
+                base
+                + (years * 10)
+                + (total * 3)
+                + (aav * 5)
+            )
+        else:
+            # Older FA weights
+            points = (
+                base
+                + (years * 15)
+                + (total * 2)
+                + (aav * 4)
+            )
+
+        results[team] = round(points, 2)
+
+    winner = max(results, key=results.get)
+
+    # Build embed
+    embed = discord.Embed(
+        title=f"🧾 Free Agency Results for {name}",
+        description=f"Favorites: **{', '.join(favorites)}**",
+        color=discord.Color.green()
+    )
+
+    sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+    for team, pts in sorted_results:
+        offer = offers[team]
+        emoji = "⭐" if team in favorites else "⚾"
+        embed.add_field(
+            name=f"{emoji} {team}",
+            value=f"**{offer['years']}y / ${offer['total']}M**\nScore: **{pts} pts**",
+            inline=False
+        )
+
+    embed.add_field(
+        name="🏆 Decision",
+        value=f"**{name} signs with the {winner}!**",
+        inline=False
+    )
+
+    embed.set_footer(text="Free Agency Bot ⚾ Created by You")
+    await ctx.send(embed=embed)
+
+# -------------------------
+# 🗑️ RESET OR REMOVE SESSION
+# -------------------------
+@bot.command()
+async def resetFA(ctx, name: str):
+    """Remove a player's free agency session."""
+    name_key = name.lower()
+    if name_key in free_agencies:
+        del free_agencies[name_key]
+        await ctx.send(f"🗑️ Free agency for **{name}** has been cleared.")
+    else:
+        await ctx.send(f"❌ No active free agency found for **{name}**.")
+
+# Run bot
+bot.run("YOUR_BOT_TOKEN_HERE")
