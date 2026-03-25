@@ -31,6 +31,9 @@ WISHLIST_FILE = os.path.join(DATA_DIR, 'wishlists.json')
 COMMAND_HASH_FILE = os.path.join(DATA_DIR, 'command_hash.txt')
 TEMPLATES_FILE = os.path.join(DATA_DIR, 'offer_templates.json')
 GHOSTLIST_FILE = os.path.join(DATA_DIR, 'ghostlists.json')
+GM_STRATEGIES_FILE = os.path.join(DATA_DIR, 'gm_strategies.json')
+NEGOTIATION_HISTORY_FILE = os.path.join(DATA_DIR, 'negotiation_history.json')
+RIVALRY_FILE = os.path.join(DATA_DIR, 'rivalries.json')
 
 # Ensure data directory exists
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -129,6 +132,15 @@ def init_data_files():
 
     if not os.path.exists(GHOSTLIST_FILE):
         save_json(GHOSTLIST_FILE, {})
+
+    if not os.path.exists(GM_STRATEGIES_FILE):
+        save_json(GM_STRATEGIES_FILE, {})
+
+    if not os.path.exists(NEGOTIATION_HISTORY_FILE):
+        save_json(NEGOTIATION_HISTORY_FILE, {})
+
+    if not os.path.exists(RIVALRY_FILE):
+        save_json(RIVALRY_FILE, {})
 
 
 def save_json(filepath, data):
@@ -548,15 +560,41 @@ def backup_data(label: str = ""):
 
 # ============= NEW GAME MECHANICS HELPERS =============
 
-def track_lowball_offer(player_id, team_name):
-    """Track lowball offers. Increments count for team against player."""
+def track_lowball_offer(player_id, team_name, aav, market_value):
+    """Track lowball offers. Marks escalating reputation penalties. Returns penalty level (0-2)."""
     ghostlist = load_json(GHOSTLIST_FILE)
     if player_id not in ghostlist:
         ghostlist[player_id] = {}
     if team_name not in ghostlist[player_id]:
-        ghostlist[player_id][team_name] = {"lowball_count": 0, "ghosted": False}
-    ghostlist[player_id][team_name]["lowball_count"] += 1
+        ghostlist[player_id][team_name] = {
+            "lowball_count": 0,
+            "ghosted": False,
+            "ghosted_timestamp": None,
+            "ghosted_reason": None,
+            "apology_attempts": 0
+        }
+    
+    # Calculate if this is a lowball (< 85% of market value)
+    is_lowball = aav < (market_value * 0.85)
+    
+    if is_lowball:
+        ghostlist[player_id][team_name]["lowball_count"] += 1
+        penalty_level = ghostlist[player_id][team_name]["lowball_count"]
+        
+        # Escalating penalties: 1st lowball = warning, 2nd = restricted, 3+ = full ghost
+        if penalty_level >= 3:
+            ghostlist[player_id][team_name]["ghosted"] = True
+            ghostlist[player_id][team_name]["ghosted_timestamp"] = datetime.now().isoformat()
+            ghostlist[player_id][team_name]["ghosted_reason"] = f"Serial lowballer ({penalty_level} lowballs)"
+    
     save_json(GHOSTLIST_FILE, ghostlist)
+    return ghostlist[player_id][team_name].get("lowball_count", 0)
+
+
+def get_lowball_status(player_id, team_name):
+    """Get lowball history for a team against a player."""
+    ghostlist = load_json(GHOSTLIST_FILE)
+    return ghostlist.get(player_id, {}).get(team_name, {})
 
 
 def is_team_ghosted(player_id, team_name):
@@ -565,24 +603,123 @@ def is_team_ghosted(player_id, team_name):
     return ghostlist.get(player_id, {}).get(team_name, {}).get("ghosted", False)
 
 
-def ghost_team(player_id, team_name):
-    """Mark a team as ghosted (blocked from submitting offers)."""
+def ghost_team(player_id, team_name, reason="Lowball offers"):
+    """Mark a team as ghosted (blocked from submitting offers) with reason and timestamp."""
     ghostlist = load_json(GHOSTLIST_FILE)
     if player_id not in ghostlist:
         ghostlist[player_id] = {}
     if team_name not in ghostlist[player_id]:
-        ghostlist[player_id][team_name] = {"lowball_count": 0}
+        ghostlist[player_id][team_name] = {"lowball_count": 0, "apology_attempts": 0}
     ghostlist[player_id][team_name]["ghosted"] = True
+    ghostlist[player_id][team_name]["ghosted_timestamp"] = datetime.now().isoformat()
+    ghostlist[player_id][team_name]["ghosted_reason"] = reason
     save_json(GHOSTLIST_FILE, ghostlist)
 
 
 def unghost_team(player_id, team_name):
-    """Unghosts a team after they submit a counter_apology."""
+    """Unghosts a team after successful counter_apology."""
     ghostlist = load_json(GHOSTLIST_FILE)
     if player_id in ghostlist and team_name in ghostlist[player_id]:
         ghostlist[player_id][team_name]["ghosted"] = False
         ghostlist[player_id][team_name]["lowball_count"] = 0
+        ghostlist[player_id][team_name]["ghosted_timestamp"] = None
         save_json(GHOSTLIST_FILE, ghostlist)
+
+
+def record_apology_attempt(player_id, team_name, apology_level):
+    """Track apology attempts to prevent spam. apology_level: 'simple', 'heartfelt', 'premium'."""
+    ghostlist = load_json(GHOSTLIST_FILE)
+    if player_id not in ghostlist:
+        ghostlist[player_id] = {}
+    if team_name not in ghostlist[player_id]:
+        ghostlist[player_id][team_name] = {"lowball_count": 0, "apology_attempts": 0, "ghosted": False}
+    
+    ghostlist[player_id][team_name]["apology_attempts"] = ghostlist[player_id][team_name].get("apology_attempts", 0) + 1
+    ghostlist[player_id][team_name][f"last_apology_{apology_level}"] = datetime.now().isoformat()
+    
+    save_json(GHOSTLIST_FILE, ghostlist)
+
+
+# ============= BUDGET STRATEGY HELPERS =============
+
+def set_budget_strategy(gm_id, team_name, strategy):
+    """Save GM's budget strategy: 'spender' (aggresively counter), 'balanced', or 'saver' (be selective)."""
+    strategies = load_json(GM_STRATEGIES_FILE)
+    key = f"{gm_id}:{team_name}"
+    strategies[key] = {
+        "strategy": strategy,
+        "set_timestamp": datetime.now().isoformat()
+    }
+    save_json(GM_STRATEGIES_FILE, strategies)
+
+
+def get_budget_strategy(gm_id, team_name):
+    """Retrieve GM's budget strategy. Default 'balanced'."""
+    strategies = load_json(GM_STRATEGIES_FILE)
+    key = f"{gm_id}:{team_name}"
+    return strategies.get(key, {}).get("strategy", "balanced")
+
+
+def get_counter_threshold(gm_id, team_name):
+    """Get counter-offer threshold based on strategy. Higher = more likely to counter."""
+    strategy = get_budget_strategy(gm_id, team_name)
+    thresholds = {
+        "spender": 0.15,    # Counter even weak offers (15%+)
+        "balanced": 0.25,   # Counter moderate offers (25%+)
+        "saver": 0.35       # Only counter strong offers (35%+)
+    }
+    return thresholds.get(strategy, 0.25)
+
+
+# ============= NEGOTIATION HISTORY =============
+
+def record_negotiation_event(player_id, team_name, event_type, details):
+    """Track negotiation events (offer_made, counter_received, accepted, rejected, etc)."""
+    history = load_json(NEGOTIATION_HISTORY_FILE)
+    
+    if player_id not in history:
+        history[player_id] = {}
+    if team_name not in history[player_id]:
+        history[player_id][team_name] = []
+    
+    history[player_id][team_name].append({
+        "timestamp": datetime.now().isoformat(),
+        "type": event_type,
+        "details": details
+    })
+    
+    save_json(NEGOTIATION_HISTORY_FILE, history)
+
+
+def get_negotiation_count(player_id, team_name):
+    """Get total number of counter rounds between a player and team."""
+    history = load_json(NEGOTIATION_HISTORY_FILE)
+    events = history.get(player_id, {}).get(team_name, [])
+    return len([e for e in events if e["type"] in ["counter_made", "counter_received"]])
+
+
+# ============= RIVALRY TRACKING =============
+
+def record_rivalry_counter(team1, team2):
+    """Track competitive countering between two teams."""
+    rivalries = load_json(RIVALRY_FILE)
+    key = tuple(sorted([team1, team2]))
+    key_str = f"{key[0]}:{key[1]}"
+    
+    if key_str not in rivalries:
+        rivalries[key_str] = {"counter_count": 0, "last_interaction": None}
+    
+    rivalries[key_str]["counter_count"] += 1
+    rivalries[key_str]["last_interaction"] = datetime.now().isoformat()
+    
+    save_json(RIVALRY_FILE, rivalries)
+
+
+def get_top_rivalries(limit=5):
+    """Get the most competitive team pairings."""
+    rivalries = load_json(RIVALRY_FILE)
+    sorted_rivalries = sorted(rivalries.items(), key=lambda x: x[1]["counter_count"], reverse=True)
+    return sorted_rivalries[:limit]
 
 
 def save_offer_template(gm_id, team_name, template_name, years, aav):
@@ -1536,7 +1673,28 @@ class FAGMCommands(app_commands.Group):
         score = decision_engine.calculate_offer_score(offer, player, team_data, market_data)
         offer["decision_score"] = score
 
+        # Track lowball offers automatically
+        lowball_count = track_lowball_offer(player_id, user_team, aav, player["market_value"])
+        lowball_status = get_lowball_status(player_id, user_team)
+        
+        # Warn about ghosting escalation
+        ghosting_warning = ""
+        if lowball_status.get("ghosted"):
+            ghosting_warning = "\n⚠️ **You are currently ghosted on this player!** This offer was blocked. Use `/fa counter_apology` to regain rights."
+        elif lowball_count >= 2:
+            ghosting_warning = f"\n⚠️ **Warning:** {lowball_count} lowball offers detected. One more and you'll be ghosted!"
+
         offers[offer_id] = offer
+        
+        # Block offer if ghosted
+        if lowball_status.get("ghosted"):
+            await interaction.response.send_message(
+                f"❌ {user_team} is currently **ghosted** by {player['name']}. "
+                f"Use `/fa counter_apology <player>` to apologize and regain offer rights.",
+                ephemeral=True
+            )
+            return
+        
         save_json(OFFERS_FILE, offers)
 
         # Track distinct teams offering — same team re-offering doesn't inflate interest
@@ -1548,6 +1706,9 @@ class FAGMCommands(app_commands.Group):
         if "best_offer" not in player or player["best_offer"] is None or aav > player["best_offer"]["aav"]:
             player["best_offer"] = {"team": user_team, "aav": aav, "years": years}
         save_json(FREE_AGENTS_FILE, free_agents)
+
+        # Record negotiation event
+        record_negotiation_event(player_id, user_team, "offer_made", {"aav": aav, "years": years, "score": score})
 
         market_data["total_offers_made"] += 1
         save_json(MARKET_FILE, market_data)
@@ -1842,6 +2003,9 @@ class FAGMCommands(app_commands.Group):
         action = decision_engine.should_counter(new_score, round_num)
         breakdown = generate_score_breakdown(target_offer, player, team_data, market_data)
 
+        # Record negotiation event
+        record_negotiation_event(player_id, user_team, "counter_made", {"aav": aav, "years": years, "score": new_score})
+
         if action == "accept":
             offers[target_offer_id] = target_offer
             save_json(OFFERS_FILE, offers)
@@ -1856,12 +2020,17 @@ class FAGMCommands(app_commands.Group):
                 old_offer = offers[pending_signing["offer_id"]]
                 old_score = old_offer.get("decision_score", 0)
                 if new_score > old_score:
+                    # Track rivalry if teams are competing
+                    if old_offer["team"] != user_team:
+                        record_rivalry_counter(user_team, old_offer["team"])
                     await _cancel_pending_signing_and_counter(
                         pending_signing, old_offer, player, negotiations,
                         reason=f"**{user_team}** has improved their offer and taken the lead!"
                     )
                     await _set_pending_signing(interaction, target_offer, player, player_id, thread, settings)
                 elif abs(new_score - old_score) < 0.001:
+                    if old_offer["team"] != user_team:
+                        record_rivalry_counter(user_team, old_offer["team"])
                     await _counter_tied_offer(old_offer, player, negotiations, market_data)
                     await _set_pending_signing(interaction, target_offer, player, player_id, thread, settings)
                 else:
@@ -1879,6 +2048,9 @@ class FAGMCommands(app_commands.Group):
                 offers[target_offer_id] = target_offer
                 save_json(OFFERS_FILE, offers)
                 
+                # Record counter received
+                record_negotiation_event(player_id, user_team, "counter_received", {"aav": counter['aav'], "years": counter['years']})
+                
                 # Show round number in thread
                 round_num_display = len(target_offer.get("counter_offers", [])) + 1
                 active_teams = len([o for o in offers.values() if o["player_id"] == player_id and o["status"] == "pending"])
@@ -1893,15 +2065,15 @@ class FAGMCommands(app_commands.Group):
                     )
                 
                 # Send DM notification to GM with side-by-side comparison
-                aav_diff = counter['aav'] - years
+                aav_diff = counter['aav'] - aav
                 years_diff = counter['years'] - years
                 aav_pct = ((counter['aav'] - aav) / aav * 100) if aav > 0 else 0
                 
                 comparison = f"**Your offer:** {years}yr/${aav:,}/yr\n**Counter:** {counter['years']}yr/${counter['aav']:,}/yr\n"
                 if aav_pct > 0:
-                    comparison += f"**(+${int(aav_pct * aav / 100):,}/yr, {aav_pct:+.0f}%)*"
+                    comparison += f"**(+${int(aav_diff):,}/yr, {aav_pct:+.0f}%)*"
                 elif aav_pct < 0:
-                    comparison += f"**(${int(aav_pct * aav / 100):,}/yr, {aav_pct:.0f}%)*"
+                    comparison += f"**({int(aav_diff):,}/yr, {aav_pct:.0f}%)*"
                 else:
                     comparison += f"**(same money)*"
                 
@@ -2387,6 +2559,38 @@ class FAGMCommands(app_commands.Group):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="rivalries", description="See the top competitive matchups (most bidding wars between teams)")
+    async def rivalries(self, interaction: discord.Interaction):
+        rivalries = get_top_rivalries(limit=10)
+
+        if not rivalries:
+            embed = discord.Embed(
+                title="🏅 Team Rivalries",
+                description="No competitive matchups yet. Teams need to counter each other in bidding wars!",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        rows = []
+        for i, (key, data) in enumerate(rivalries, 1):
+            teams = key.split(":")
+            counter_count = data["counter_count"]
+            last_time = data.get("last_interaction", "")
+            try:
+                dt = datetime.fromisoformat(last_time)
+                time_str = dt.strftime("%m/%d %H:%M")
+            except:
+                time_str = "Recently"
+            
+            rows.append(
+                f"{i}. ⚔️ **{teams[0]}** ↔️ **{teams[1]}** — {counter_count} competitive counters | Last: {time_str}"
+            )
+
+        pages = make_pages("🏅 Team Rivalries — Most Competitive Matchups", discord.Color.purple(), rows, per_page=10)
+        view = PaginatorView(pages) if len(pages) > 1 else None
+        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
     @app_commands.command(name="wish_add", description="Add a player to your wish list (max 5)")
     @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
     async def wish_add(self, interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
@@ -2680,12 +2884,19 @@ class FAGMCommands(app_commands.Group):
         view = PaginatorView(pages) if len(pages) > 1 else None
         await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
 
-    @app_commands.command(name="counter_apology", description="Apologize to a ghosted player and regain offer rights")
+    @app_commands.command(name="counter_apology", description="Apologize to a ghosted player and regain offer rights (tiers: simple, heartfelt, premium)")
     @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
-    async def counter_apology(self, interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
+    async def counter_apology(self, interaction: discord.Interaction, player_name: str, apology_level: str = "simple", team: Optional[str] = None):
         user_team, _, err = resolve_gm_team(interaction.user.id, team)
         if err:
             await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        if apology_level not in ["simple", "heartfelt", "premium"]:
+            await interaction.response.send_message(
+                "❌ Apology level must be: `simple` (30% success), `heartfelt` (65% success), or `premium` (95% success)",
+                ephemeral=True
+            )
             return
 
         free_agents = load_json(FREE_AGENTS_FILE)
@@ -2701,27 +2912,88 @@ class FAGMCommands(app_commands.Group):
             )
             return
 
-        unghost_team(player_id, user_team)
-        log_action("counter_apology", f"{user_team} apologized to {player['name']} and regained offer rights")
+        # Check apology cooldown (can't spam apologies)
+        ghostlist = load_json(GHOSTLIST_FILE)
+        status = ghostlist.get(player_id, {}).get(user_team, {})
+        last_apology_field = f"last_apology_{apology_level}"
+        
+        if last_apology_field in status:
+            last_time = datetime.fromisoformat(status[last_apology_field])
+            cooldown_hours = {"simple": 2, "heartfelt": 6, "premium": 12}[apology_level]
+            hours_passed = (datetime.now() - last_time).total_seconds() / 3600
+            if hours_passed < cooldown_hours:
+                remaining = cooldown_hours - hours_passed
+                await interaction.response.send_message(
+                    f"⏳ {user_team}, {player['name']}'s agent won't hear another apology for {int(remaining)}h. Give it time.",
+                    ephemeral=True
+                )
+                return
 
-        embed = discord.Embed(
-            title="🤝 Apology Accepted!",
-            description=f"You've regained the right to submit offers to **{player['name']}**.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Next Steps", value=f"Use `/fa offer {player['name']} <years> <aav>` to try again with a better offer.", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Success rate based on tier
+        success_rates = {"simple": 0.30, "heartfelt": 0.65, "premium": 0.95}
+        success = random.random() < success_rates[apology_level]
 
-        # Try to notify player via thread if exists
-        negotiations = load_json(NEGOTIATIONS_FILE)
-        for neg in negotiations.values():
-            if neg.get("player") == player["name"] and neg.get("team") == user_team:
-                try:
-                    thread = await interaction.client.fetch_channel(neg["thread_id"])
-                    await thread.send(f"📨 **{user_team}** has apologized for previous lowball offers and is back in the bidding!")
-                except Exception:
-                    pass
-                break
+        apology_messages = {
+            "simple": {
+                "your_message": "We made a mistake on our last offer. Let's try again.",
+                "accept": "The agent nods: 'Apology accepted. You get one more shot.'",
+                "reject": "The agent shakes their head: 'Words aren't enough. Show me the money.'"
+            },
+            "heartfelt": {
+                "your_message": "We disrespected your client with that lowball. Our organization values respect and fairness. Let's discuss what your client truly deserves.",
+                "accept": "The agent is moved: 'Alright, I see the sincerity. You're back in the bidding.'",
+                "reject": "The agent remains unmoved: 'Apologies are nice, but actions speak louder. Come back with a real offer.'"
+            },
+            "premium": {
+                "your_message": "I owe you a sincere apology on behalf of the entire organization. Your client is elite talent and deserves elite respect and compensation. We're ready to prove it.",
+                "accept": "The agent is impressed: 'That's the level of respect my client deserves. Welcome back.'",
+                "reject": "Even the agent seems surprised you failed: 'That was a hell of an apology, but my client wants to move on.'"
+            }
+        }
+
+        messages = apology_messages[apology_level]
+        cost = {"simple": 0, "heartfelt": 50000, "premium": 250000}[apology_level]
+
+        if success:
+            unghost_team(player_id, user_team)
+            record_apology_attempt(player_id, user_team, apology_level)
+            log_action("counter_apology_success", f"{user_team} successfully apologized to {player['name']} ({apology_level})")
+
+            embed = discord.Embed(
+                title="🤝 Apology Accepted!",
+                description=f"You've regained the right to submit offers to **{player['name']}**.",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Your Message", value=f"*{messages['your_message']}*", inline=False)
+            embed.add_field(name="Agent Response", value=messages['accept'], inline=False)
+            if cost > 0:
+                embed.add_field(name="Apology Cost", value=f"*Gestures of goodwill: ${cost:,} cap penalty*", inline=False)
+            embed.add_field(name="Next Steps", value=f"Use `/fa offer {player['name']} <years> <aav>` to submit a serious offer.", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+            # Try to notify player via thread if exists
+            negotiations = load_json(NEGOTIATIONS_FILE)
+            for neg in negotiations.values():
+                if neg.get("player") == player["name"] and neg.get("team") == user_team:
+                    try:
+                        thread = await interaction.client.fetch_channel(neg["thread_id"])
+                        await thread.send(f"📨 **{user_team}** has formally apologized for previous lowball offers and is back in serious negotiations!")
+                    except Exception:
+                        pass
+                    break
+        else:
+            record_apology_attempt(player_id, user_team, apology_level)
+            log_action("counter_apology_failed", f"{user_team}'s apology to {player['name']} was rejected ({apology_level})")
+
+            embed = discord.Embed(
+                title="😔 Apology Declined",
+                description=f"Your apology was not accepted by {player['name']}'s agent.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Your Message", value=f"*{messages['your_message']}*", inline=False)
+            embed.add_field(name="Agent Response", value=messages['reject'], inline=False)
+            embed.add_field(name="Try Again", value=f"You can attempt another apology in a few hours. Consider escalating to a {['heartfelt', 'premium', 'premium'][['simple', 'heartfelt', 'premium'].index(apology_level)]} apology next time.", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="offer_history", description="View full history of all offers in negotiation")
     @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
@@ -2758,13 +3030,133 @@ class FAGMCommands(app_commands.Group):
                 time_str = ts[:16]
 
             status_icon = "✅" if o["status"] == "accepted" else "❌" if o["status"] == "rejected" else "⏳"
+            counter_count = len(o.get("counter_offers", []))
+            counter_badge = f" [{counter_count} counters]" if counter_count > 0 else ""
+            
             rows.append(
-                f"{i}. **{o['team']}** {status_icon} — {o['years']}yr @ ${o['aav']:,}/yr | {time_str}"
+                f"{i}. **{o['team']}** {status_icon} — {o['years']}yr @ ${o['aav']:,}/yr | {time_str}{counter_badge}"
             )
 
         pages = make_pages(f"📜 Offer History — {player['name']}", discord.Color.orange(), rows, per_page=15)
         view = PaginatorView(pages) if len(pages) > 1 else None
         await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
+    @app_commands.command(name="budget_strategy", description="Set your team's negotiation strategy: spender, balanced, or saver")
+    @app_commands.autocomplete(team=autocomplete_team)
+    async def budget_strategy(self, interaction: discord.Interaction, strategy: str, team: Optional[str] = None):
+        user_team, _, err = resolve_gm_team(interaction.user.id, team)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        if strategy not in ["spender", "balanced", "saver"]:
+            await interaction.response.send_message(
+                "❌ Strategy must be one of: `spender`, `balanced`, or `saver`",
+                ephemeral=True
+            )
+            return
+
+        set_budget_strategy(interaction.user.id, user_team, strategy)
+        log_action("budget_strategy_set", f"{user_team} set strategy to {strategy}")
+
+        strategy_descriptions = {
+            "spender": {
+                "emoji": "💸",
+                "desc": "Counter aggressively even on weak offers (≥15% score). Build a bidding war.",
+                "playstyle": "High-risk, high-reward. You'll counter a lot but might overpay.",
+                "best_for": "Teams willing to spend big and drive up prices."
+            },
+            "balanced": {
+                "emoji": "⚖️",
+                "desc": "Counter strategically on moderate offers (≥25% score). Balance risk/reward.",
+                "playstyle": "Default approach. Counter quality opportunities without overextending.",
+                "best_for": "Teams looking for value deals with reasonable counteroffering."
+            },
+            "saver": {
+                "emoji": "🏦",
+                "desc": "Only counter on strong offers (≥35% score). Preserve cap space.",
+                "playstyle": "Conservative. You'll make fewer offers but stay cap-friendly.",
+                "best_for": "Teams building slowly with patient, selective signings."
+            }
+        }
+
+        info = strategy_descriptions[strategy]
+        embed = discord.Embed(
+            title=f"{info['emoji']} Budget Strategy: {strategy.title()}",
+            description=info['desc'],
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Playstyle", value=info['playstyle'], inline=False)
+        embed.add_field(name="Best For", value=info['best_for'], inline=False)
+        embed.add_field(name="Impact", value="This affects your team's counter-offer AI. GMs you negotiate with can also set their own strategies.", inline=False)
+        embed.set_footer(text="You can change your strategy at any time.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="ghosting_status", description="Check which teams have ghosted you on a player and why")
+    @app_commands.autocomplete(player_name=autocomplete_available_player)
+    async def ghosting_status(self, interaction: discord.Interaction, player_name: str):
+        free_agents = load_json(FREE_AGENTS_FILE)
+        player_id, player = find_player(free_agents, player_name)
+
+        if not player:
+            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+            return
+
+        ghostlist = load_json(GHOSTLIST_FILE)
+        player_ghosts = ghostlist.get(player_id, {})
+
+        if not player_ghosts:
+            embed = discord.Embed(
+                title=f"👻 Ghosting Status — {player['name']}",
+                description="No ghosted relationships found. All teams have equal bidding rights.",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        ghosted_teams = []
+        warned_teams = []
+        for team_name, status in player_ghosts.items():
+            lowball_count = status.get("lowball_count", 0)
+            is_ghosted = status.get("ghosted", False)
+            
+            if is_ghosted:
+                ghost_time = status.get("ghosted_timestamp", "")
+                reason = status.get("ghosted_reason", "Multiple lowballs")
+                ghosted_teams.append((team_name, lowball_count, ghost_time, reason))
+            elif lowball_count >= 1:
+                warned_teams.append((team_name, lowball_count))
+
+        embed = discord.Embed(
+            title=f"👻 Ghosting Status — {player['name']}",
+            color=discord.Color.orange()
+        )
+
+        if ghosted_teams:
+            ghost_text = ""
+            for team_name, count, timestamp, reason in ghosted_teams:
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    time_str = dt.strftime("%m/%d %H:%M")
+                except:
+                    time_str = "Recently"
+                ghost_text += f"🚫 **{team_name}** — {reason} ({count} lowballs) — *Since {time_str}*\n"
+            embed.add_field(name="⛔ Ghosted Teams (Blocked from Offers)", value=ghost_text, inline=False)
+
+        if warned_teams:
+            warn_text = "\n".join(
+                f"⚠️ **{team_name}** — {count} lowball{'s' if count > 1 else ''} on record (one more = ghosted!)"
+                for team_name, count in warned_teams
+            )
+            embed.add_field(name="⚠️ Teams on Notice", value=warn_text, inline=False)
+
+        embed.add_field(
+            name="How to Regain Rights",
+            value="Ghosted teams can use `/fa counter_apology <player> simple/heartfelt/premium` to apologize and regain offer rights.",
+            inline=False
+        )
+        embed.set_footer(text="Lowballs are defined as offers < 85% of market value.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="help", description="How to play the free agency simulation")
     async def help_cmd(self, interaction: discord.Interaction):
