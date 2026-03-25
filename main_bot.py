@@ -2559,38 +2559,6 @@ class FAGMCommands(app_commands.Group):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="rivalries", description="See the top competitive matchups (most bidding wars between teams)")
-    async def rivalries(self, interaction: discord.Interaction):
-        rivalries = get_top_rivalries(limit=10)
-
-        if not rivalries:
-            embed = discord.Embed(
-                title="🏅 Team Rivalries",
-                description="No competitive matchups yet. Teams need to counter each other in bidding wars!",
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        rows = []
-        for i, (key, data) in enumerate(rivalries, 1):
-            teams = key.split(":")
-            counter_count = data["counter_count"]
-            last_time = data.get("last_interaction", "")
-            try:
-                dt = datetime.fromisoformat(last_time)
-                time_str = dt.strftime("%m/%d %H:%M")
-            except:
-                time_str = "Recently"
-            
-            rows.append(
-                f"{i}. ⚔️ **{teams[0]}** ↔️ **{teams[1]}** — {counter_count} competitive counters | Last: {time_str}"
-            )
-
-        pages = make_pages("🏅 Team Rivalries — Most Competitive Matchups", discord.Color.purple(), rows, per_page=10)
-        view = PaginatorView(pages) if len(pages) > 1 else None
-        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
-
     @app_commands.command(name="wish_add", description="Add a player to your wish list (max 5)")
     @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
     async def wish_add(self, interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
@@ -4244,6 +4212,40 @@ class FAConfigCommands(app_commands.Group):
         await channel.send(embed=embed)
         log_action("admin_announce", f"Announcement posted: {title}")
         await interaction.response.send_message(f"✅ Announcement posted to {channel.mention}.", ephemeral=True)
+
+# ============= STANDALONE COMMANDS (Avoid 25-cmd group limit) =============
+
+@bot.tree.command(name="fa_rivalries", description="See the top competitive matchups (most bidding wars between teams)")
+async def fa_rivalries(interaction: discord.Interaction):
+    rivalries = get_top_rivalries(limit=10)
+    
+    if not rivalries:
+        embed = discord.Embed(
+            title="🏅 Team Rivalries",
+            description="No competitive matchups yet. Teams need to counter each other in bidding wars!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    rows = []
+    for i, (key, data) in enumerate(rivalries, 1):
+        teams = key.split(":")
+        counter_count = data["counter_count"]
+        last_time = data.get("last_interaction", "")
+        try:
+            dt = datetime.fromisoformat(last_time)
+            time_str = dt.strftime("%m/%d %H:%M")
+        except:
+            time_str = "Recently"
+        
+        rows.append(
+            f"{i}. ⚔️ **{teams[0]}** ↔️ **{teams[1]}** — {counter_count} competitive counters | Last: {time_str}"
+        )
+
+    pages = make_pages("🏅 Team Rivalries — Most Competitive Matchups", discord.Color.purple(), rows, per_page=10)
+    view = PaginatorView(pages) if len(pages) > 1 else None
+    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
 
 
 # ============= BOT EVENTS =============
