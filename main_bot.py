@@ -609,59 +609,64 @@ def list_offer_templates(gm_id, team_name):
     return templates.get(key, {})
 
 
-def generate_player_press_quote(player, team, winning_team=False):
-    """Generate an AI-style quote from player about signing decision."""
+def generate_player_press_quote(player, team, winning_team=False, years=None, aav=None):
+    """Generate an AI-style quote from player about signing decision. Include contract terms if provided."""
     personality = player["personality"]
     team_tier = get_team_tier(team.get("win_percentage", 0.500))
     
+    # Build contract detail string if available
+    contract_detail = ""
+    if years and aav:
+        contract_detail = f" I'm signing a {years}-year deal at ${aav:,}/year. "
+    
     quotes = {
         "Win-Now": {
-            "Elite": "I'm here to chase a championship with the elite organization in baseball. This is where winners come.",
-            "Contender": "This team has what it takes to compete. I believe we can make a serious run at the title.",
-            "Competitive": "They showed me they're committed to winning, and that's what matters to me. Let's get to work.",
-            "Rebuilding": "I believe in this front office's vision. Sometimes you have to build toward greatness."
+            "Elite": f"I'm here to chase a championship with the elite organization in baseball.{contract_detail}This is where winners come.",
+            "Contender": f"This team has what it takes to compete.{contract_detail}I believe we can make a serious run at the title.",
+            "Competitive": f"They showed me they're committed to winning, and that's what matters to me.{contract_detail}Let's get to work.",
+            "Rebuilding": f"I believe in this front office's vision.{contract_detail}Sometimes you have to build toward greatness."
         },
         "Contender Seeker": {
-            "Elite": "I want to play for a winning team, and this is one of the best. Excited to contribute.",
-            "Contender": "This team competes. That's exactly what I was looking for. Let's make some noise.",
-            "Competitive": "They're headed in the right direction, and I want to be part of that journey.",
-            "Rebuilding": "I see potential here. This team is closer than people think."
+            "Elite": f"I want to play for a winning team, and this is one of the best.{contract_detail}Excited to contribute.",
+            "Contender": f"This team competes.{contract_detail}That's exactly what I was looking for. Let's make some noise.",
+            "Competitive": f"They're headed in the right direction.{contract_detail}I want to be part of that journey.",
+            "Rebuilding": f"I see potential here.{contract_detail}This team is closer than people think."
         },
         "Balanced": {
-            "Elite": "Great organization, great city, great situation. It all came together.",
-            "Contender": "Everything aligned — the team, the opportunity, the deal. Perfect fit.",
-            "Competitive": "This felt like the right move. I'm ready to contribute and help build something.",
-            "Rebuilding": "I'm looking forward to proving myself here and helping turn things around."
+            "Elite": f"Great organization, great city, great situation.{contract_detail}It all came together.",
+            "Contender": f"Everything aligned — the team, the opportunity, the deal.{contract_detail}Perfect fit.",
+            "Competitive": f"This felt like the right move.{contract_detail}I'm ready to contribute and help build something.",
+            "Rebuilding": f"I'm looking forward to proving myself here.{contract_detail}Helping turn things around."
         },
         "Loyalist": {
-            "Elite": "I want to spend my career here. This is my team now, and I'm honored to be part of the organization.",
-            "Contender": "I'm committing to this organization for the long haul. Let's build something lasting.",
-            "Competitive": "This is where I want to plant my roots. I'm excited to be here for years to come.",
-            "Rebuilding": "I believe in what this organization is building, and I want to be here through all of it."
+            "Elite": f"I want to spend my career here. This is my team now.{contract_detail}I'm honored to be part of the organization.",
+            "Contender": f"I'm committing to this organization for the long haul.{contract_detail}Let's build something lasting.",
+            "Competitive": f"This is where I want to plant my roots.{contract_detail}I'm excited to be here for years to come.",
+            "Rebuilding": f"I believe in what this organization is building.{contract_detail}I want to be here through all of it."
         },
         "Patient": {
-            "Elite": "The contract gives me security for years. I can relax and focus on performing.",
-            "Contender": "I got the years and stability I wanted. Now let's go win some games.",
-            "Competitive": "I'm secure in this deal. Ready to help this team compete.",
-            "Rebuilding": "This deal takes care of me long-term. I'm committed to being part of this rebuild."
+            "Elite": f"The contract gives me security for years.{contract_detail}I can relax and focus on performing.",
+            "Contender": f"I got the years and stability I wanted.{contract_detail}Now let's go win some games.",
+            "Competitive": f"I'm secure in this deal.{contract_detail}Ready to help this team compete.",
+            "Rebuilding": f"This deal takes care of me long-term.{contract_detail}I'm committed to being part of this rebuild."
         },
         "Hardball": {
-            "Elite": "They showed me the respect I deserve. This is a franchise that gets it.",
-            "Contender": "This team knows how to negotiate with the best players. I respect that.",
-            "Competitive": "They came correct. That's all that matters.",
-            "Rebuilding": "They showed they value me. Let's see if they can build around that."
+            "Elite": f"They showed me the respect I deserve.{contract_detail}This is a franchise that gets it.",
+            "Contender": f"This team knows how to negotiate with the best players.{contract_detail}I respect that.",
+            "Competitive": f"They came correct.{contract_detail}That's all that matters.",
+            "Rebuilding": f"They showed they value me.{contract_detail}Let's see if they can build around that."
         },
         "Money-Focused": {
-            "Elite": "The numbers are right, the organization is great. Win-win.",
-            "Contender": "They paid what I'm worth. That's the bottom line.",
-            "Competitive": "Great deal, great city, great team. Can't ask for much more.",
-            "Rebuilding": "The money was fair. Now we'll see if they can compete."
+            "Elite": f"The numbers are right, the organization is great.{contract_detail}Win-win.",
+            "Contender": f"They paid what I'm worth.{contract_detail}That's the bottom line.",
+            "Competitive": f"Great deal, great city, great team.{contract_detail}Can't ask for much more.",
+            "Rebuilding": f"The money was fair.{contract_detail}Now we'll see if they can compete."
         },
         "Mercenary": {
-            "Elite": "Best offer on the table. I'm here for the money and the winning.",
-            "Contender": "They had the best deal. That's where I go.",
-            "Competitive": "The contract made sense. Let's see what happens on the field.",
-            "Rebuilding": "Followed the money. Time to prove I'm worth it."
+            "Elite": f"Best offer on the table.{contract_detail}I'm here for the money and the winning.",
+            "Contender": f"They had the best deal.{contract_detail}That's where I go.",
+            "Competitive": f"The contract made sense.{contract_detail}Let's see what happens on the field.",
+            "Rebuilding": f"Followed the money.{contract_detail}Time to prove I'm worth it."
         }
     }
     
@@ -691,6 +696,28 @@ def format_ovr_bar(ovr):
     bar = "█" * bars + "░" * empty
     color = "🟢" if ovr >= 90 else "🟡" if ovr >= 75 else "🔴"
     return f"{color} {bar} {ovr}/100"
+
+
+def format_countdown(iso_timestamp):
+    """Convert ISO timestamp to human-readable countdown (e.g., '⏳ Expires in 2h 15m')."""
+    try:
+        deadline = datetime.fromisoformat(iso_timestamp)
+        now = datetime.now()
+        diff = deadline - now
+        
+        if diff.total_seconds() <= 0:
+            return "⏳ Expired"
+        
+        total_seconds = int(diff.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        
+        if hours > 0:
+            return f"⏳ Expires in {hours}h {minutes}m"
+        else:
+            return f"⏳ Expires in {minutes}m"
+    except Exception:
+        return "⏳ Time unknown"
 
 
 # ============= CAP MANAGEMENT =============
@@ -929,9 +956,9 @@ async def process_signing(interaction_or_ctx, offer, player, thread):
 
     log_action("signing", f"{player['name']} signed with {offer['team']}")
 
-    # Generate player press quote
+    # Generate player press quote with contract details
     winning_team = teams.get(offer["team"], {})
-    player_quote = generate_player_press_quote(player, winning_team)
+    player_quote = generate_player_press_quote(player, winning_team, years=offer["years"], aav=offer["aav"])
 
     signing_msg = (
         f"🎉 **SIGNING ANNOUNCEMENT** 🎉\n\n"
@@ -1391,13 +1418,33 @@ class FAGMCommands(app_commands.Group):
         offers = load_json(OFFERS_FILE)
         pending_offers = [o for o in offers.values() if o["team"] == user_team and o["status"] == "pending"]
 
+        # Calculate visual meter
+        if total_cap > 0:
+            pct_used = (pending_cap / total_cap) * 100
+            filled = int((pending_cap / total_cap) * 20)
+            empty = 20 - filled
+            meter = "█" * filled + "░" * empty
+            
+            if available_cap > 10000000:
+                color_emoji = "🟢"
+            elif available_cap > 5000000:
+                color_emoji = "🟡"
+            else:
+                color_emoji = "🔴"
+        else:
+            meter = "░░░░░░░░░░░░░░░░░░░░"
+            pct_used = 0
+            color_emoji = "⚪"
+
         embed = discord.Embed(
             title=f"💰 Cap Space Summary — {user_team}",
             color=discord.Color.gold() if available_cap > 5000000 else discord.Color.orange() if available_cap > 0 else discord.Color.red()
         )
-        embed.add_field(name="Total Cap Space", value=f"${total_cap:,}", inline=True)
-        embed.add_field(name="Pending Offers", value=f"${pending_cap:,}", inline=True)
-        embed.add_field(name="Available Cap", value=f"${available_cap:,}", inline=True)
+        embed.add_field(
+            name="Cap Usage", 
+            value=f"{color_emoji} {meter} {pct_used:.0f}% used\n**${total_cap:,}** total | **${pending_cap:,}** pending | **${available_cap:,}** available",
+            inline=False
+        )
 
         if pending_offers:
             offer_lines = [f"• {o['team']} → {o['player_name']}: ${o['aav']:,}/yr" for o in pending_offers]
@@ -1564,8 +1611,14 @@ class FAGMCommands(app_commands.Group):
             save_json(NEGOTIATIONS_FILE, negotiations)
 
             breakdown = generate_score_breakdown(offer, player, team_data, market_data)
+            
+            # Show bidding war round if there are competing offers
+            round_header = ""
+            if bidding_war_detected:
+                round_header = f"⚡ **BIDDING WAR DETECTED!** {len(competing_offers) + 1} teams competing\n"
+            
             await thread.send(
-                f"**{'New Offer' if existing_thread_id else 'Negotiations'} — {player['name']}**\n"
+                f"{round_header}**{'New Offer' if existing_thread_id else 'Negotiations'} — {player['name']}**\n"
                 f"**{user_team}** offer: **{years} years at ${aav:,}/year** (${aav * years:,} total)\n\n"
                 f"{breakdown}"
             )
@@ -1825,19 +1878,39 @@ class FAGMCommands(app_commands.Group):
                 target_offer["counter_offers"].append(counter)
                 offers[target_offer_id] = target_offer
                 save_json(OFFERS_FILE, offers)
+                
+                # Show round number in thread
+                round_num_display = len(target_offer.get("counter_offers", [])) + 1
+                active_teams = len([o for o in offers.values() if o["player_id"] == player_id and o["status"] == "pending"])
+                round_header = f"⚡ **Round {round_num_display} of bidding** | {active_teams} team(s) competing\n"
+                
                 if thread:
                     await thread.send(
-                        f"**{user_team}** responded: {years} years at ${aav:,}/year\n\n"
+                        f"{round_header}**{user_team}** responded: {years} years at ${aav:,}/year\n\n"
                         f"{breakdown}\n\n"
                         f"**Agent Response:** {counter['message']}\n"
                         f"**Counter Offer:** {counter['years']} years at ${counter['aav']:,}/year"
                     )
                 
-                # Send DM notification to GM
+                # Send DM notification to GM with side-by-side comparison
+                aav_diff = counter['aav'] - years
+                years_diff = counter['years'] - years
+                aav_pct = ((counter['aav'] - aav) / aav * 100) if aav > 0 else 0
+                
+                comparison = f"**Your offer:** {years}yr/${aav:,}/yr\n**Counter:** {counter['years']}yr/${counter['aav']:,}/yr\n"
+                if aav_pct > 0:
+                    comparison += f"**(+${int(aav_pct * aav / 100):,}/yr, {aav_pct:+.0f}%)*"
+                elif aav_pct < 0:
+                    comparison += f"**(${int(aav_pct * aav / 100):,}/yr, {aav_pct:.0f}%)*"
+                else:
+                    comparison += f"**(same money)*"
+                
+                if years_diff > 0:
+                    comparison += f" **(+{years_diff} year(s))**"
+                
                 counter_notification = (
                     f"⚡ **Counter from {player['name']}'s agent!**\n\n"
-                    f"Your offer of {years}yr/${aav:,}/yr to {player['name']} has been countered.\n\n"
-                    f"**Their counter:** {counter['years']} years at ${counter['aav']:,}/year\n"
+                    f"{comparison}\n\n"
                     f"**Message:** {counter['message']}\n\n"
                     f"Use `/fa counter {player['name']} <years> <aav>` to respond, or check the negotiation thread."
                 )
@@ -1892,15 +1965,14 @@ class FAGMCommands(app_commands.Group):
 
         rows = []
         for o in pending:
-            expires = datetime.fromisoformat(o["expires"])
-            hours_left = max(0, int((expires - datetime.now()).total_seconds() / 3600))
+            countdown = format_countdown(o["expires"])
             counters = o.get("counter_offers", [])
             counter_note = ""
             if counters:
                 lc = counters[-1]
                 counter_note = f" | **Counter:** {lc['years']}yr/${lc['aav']:,}"
             rows.append(
-                f"**{o['player_name']}** — {o['years']}yr/${o['aav']:,}/yr | Score: {o['decision_score']:.1%} | Expires: {hours_left}h{counter_note}"
+                f"**{o['player_name']}** — {o['years']}yr/${o['aav']:,}/yr | Score: {o['decision_score']:.1%} | {countdown}{counter_note}"
             )
 
         pages = make_pages(f"📋 Pending Offers — {user_team}", discord.Color.blue(), rows, per_page=8)
@@ -2302,8 +2374,15 @@ class FAGMCommands(app_commands.Group):
         if not active:
             embed.description = "No active offers on this player yet."
         else:
-            team_list = "\n".join(f"• **{o['team']}**" for o in active)
-            embed.description = f"**{len(active)} team(s)** currently bidding:\n{team_list}"
+            # Find the max number of rounds across all offers
+            max_rounds = max((len(o.get("counter_offers", [])) for o in active), default=0)
+            round_label = f"Round {max_rounds + 1}" if max_rounds > 0 else "Round 1"
+            
+            team_list = "\n".join(
+                f"• **{o['team']}** ({len(o.get('counter_offers', []))} counters)" 
+                for o in active
+            )
+            embed.description = f"⚡ **{round_label} of bidding** | **{len(active)} team(s)** currently competing:\n{team_list}"
             embed.set_footer(text="Offer amounts are confidential — only team names are shown.")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
