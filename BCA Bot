@@ -157,31 +157,52 @@ def get_salary_range(ovr):
         return bands["0-69"]
 
 def calculate_ideal_length(age, personality):
-    """Dynamic ideal length calculation based on age and personality"""
-    # Base length based on age
-    if age >= 35:
-        base_min, base_max = 1, 2
-    elif age >= 32:
-        base_min, base_max = 4, 6
-    elif age >= 28:
+    """Ideal contract length: age group sets the base, personality adjusts it.
+
+    Age groups (per design):
+      23-27 → stability seekers, prefer long deals (5-7 yrs)
+      28-31 → balanced/prime, prefer medium deals (4-5 yrs)
+      32-34 → win-now/money focused, prefer shorter deals (2-4 yrs)
+      35+   → mercenary mindset, prefer very short deals (1-2 yrs)
+    """
+    # Age group base
+    if age <= 27:
+        base_min, base_max = 5, 7
+    elif age <= 31:
         base_min, base_max = 4, 5
-    elif age <= 26:
+    elif age <= 34:
         base_min, base_max = 2, 4
     else:
-        base_min, base_max = 3, 4
-    
-    # Personality adjustments
-    if personality in ["Win-Now", "Contender Seeker"]:
-        base_min = max(1, base_min - 1)
-        base_max = max(3, base_max - 1)
-    elif personality in ["Loyalist", "Patient"]:
-        base_min += 1
-        base_max += 1
-    elif personality in ["Money-Focused", "Mercenary"]:
-        base_min = max(2, base_min)
-        base_max = min(7, base_max + 1)
-    
+        base_min, base_max = 1, 2
+
+    # Personality modifier
+    personality_adj = {
+        "Win-Now":          -2,
+        "Contender Seeker": -1,
+        "Balanced":          0,
+        "Loyalist":         +1,
+        "Patient":          +2,
+        "Hardball":         -1,
+        "Money-Focused":     0,
+        "Mercenary":        -2,
+    }
+    adj = personality_adj.get(personality, 0)
+    base_min = max(1, base_min + adj)
+    base_max = max(2, base_max + adj)
+
     return {"min": base_min, "max": base_max}
+
+
+def get_team_tier(win_percentage):
+    """Return team tier label based on win percentage"""
+    if win_percentage >= 0.600:
+        return "Elite"
+    elif win_percentage >= 0.550:
+        return "Contender"
+    elif win_percentage >= 0.500:
+        return "Competitive"
+    else:
+        return "Rebuilding"
 
 def calculate_contention_bonus(win_percentage):
     """Calculate contention bonus based on win percentage"""
@@ -293,6 +314,38 @@ def generate_accept_message(personality):
     }
     return messages.get(personality, "I accept the offer! Let's make it official.")
 
+def find_team_name(teams, input_name):
+    """Case-insensitive team name lookup — returns the canonical key or None"""
+    input_lower = input_name.lower()
+    for key in teams:
+        if key.lower() == input_lower:
+            return key
+    return None
+
+def find_player(free_agents, input_name, status=None):
+    """Case-insensitive player lookup — returns (player_id, player) or (None, None)"""
+    input_lower = input_name.lower()
+    for pid, p in free_agents.items():
+        if p["name"].lower() == input_lower:
+            if status is None or p["status"] == status:
+                return pid, p
+    return None, None
+
+def get_user_team(user_id):
+    """Return (team_name, team_data) for the given Discord user ID, or (None, None)."""
+    teams = load_json(TEAMS_FILE)
+    for name, data in teams.items():
+        if data["gm_id"] == user_id:
+            return name, data
+    return None, None
+
+async def check_admin(interaction: discord.Interaction) -> bool:
+    """Send an error and return False if the user is not a server administrator."""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+        return False
+    return True
+
 def log_action(action_type, details):
     """Log bot actions for audit trail"""
     logs = load_json(LOGS_FILE)
@@ -329,16 +382,6 @@ class CapManager:
     def can_make_offer(self, aav):
         """Check if team can afford a new offer"""
         return self.get_available_cap() >= aav
-    
-    def reserve_cap(self, offer_id, aav):
-        """Reserve cap space for a pending offer"""
-        # Cap is tracked in offers_data, no separate reservation needed
-        pass
-    
-    def release_cap(self, offer_id):
-        """Release cap space from an expired/rejected offer"""
-        # Cap is automatically released when offer status changes
-        pass
 
 # ============= DECISION ENGINE =============
 
@@ -442,10 +485,12 @@ class FAGMCommands(app_commands.Group):
             await interaction.response.send_message("❌ Cannot join teams after free agency has started!", ephemeral=True)
             return
         
-        # Check if team exists
-        if team_name not in teams:
+        # Check if team exists (case-insensitive)
+        canonical = find_team_name(teams, team_name)
+        if not canonical:
             await interaction.response.send_message(f"❌ Team '{team_name}' not found. Use `/fa available_teams` to see available teams.", ephemeral=True)
             return
+        team_name = canonical
         
         # Check if team already has GM
         if teams[team_name]["gm_id"] is not None:
@@ -453,10 +498,10 @@ class FAGMCommands(app_commands.Group):
             return
         
         # Check if user already has a team
-        for team, data in teams.items():
-            if data["gm_id"] == interaction.user.id:
-                await interaction.response.send_message(f"❌ You are already the GM of {team}. Use `/fa leave_team` first if you want to change teams.", ephemeral=True)
-                return
+        existing_team, _ = get_user_team(interaction.user.id)
+        if existing_team:
+            await interaction.response.send_message(f"❌ You are already the GM of {existing_team}. Use `/fa leave_team` first if you want to change teams.", ephemeral=True)
+            return
         
         # Assign GM
         teams[team_name]["gm_id"] = interaction.user.id
@@ -478,34 +523,24 @@ class FAGMCommands(app_commands.Group):
     @app_commands.command(name="my_team", description="View your currently assigned team")
     async def my_team(self, interaction: discord.Interaction):
         """View your team info"""
-        teams = load_json(TEAMS_FILE)
-        
-        # Find user's team
-        user_team = None
-        for team_name, data in teams.items():
-            if data["gm_id"] == interaction.user.id:
-                user_team = (team_name, data)
-                break
-        
-        if not user_team:
+        team_name, data = get_user_team(interaction.user.id)
+        if not team_name:
             await interaction.response.send_message("❌ You are not assigned to any team. Use `/fa join [team_name]` to join a team.", ephemeral=True)
             return
         
-        team_name, data = user_team
+        cap_manager = CapManager(team_name)
+        available = cap_manager.get_available_cap()
         
         embed = discord.Embed(
             title=f"🏆 {team_name}",
             description=f"GM: {data['gm_name']}",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Cap Space", value=f"${data['cap_space']:,}", inline=True)
+        embed.add_field(name="Total Cap Space", value=f"${data['cap_space']:,}", inline=True)
+        embed.add_field(name="Pending Offers", value=f"${data['cap_space'] - available:,}", inline=True)
+        embed.add_field(name="Available Cap", value=f"${available:,}", inline=True)
         embed.add_field(name="Record", value=f"{data['wins']}-{data['losses']}", inline=True)
         embed.add_field(name="Win %", value=f"{data['win_percentage']:.3f}", inline=True)
-        
-        # Calculate available cap with pending offers
-        cap_manager = CapManager(team_name)
-        available = cap_manager.get_available_cap()
-        embed.add_field(name="Available Cap", value=f"${available:,}", inline=True)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
@@ -541,7 +576,6 @@ class FAGMCommands(app_commands.Group):
     @app_commands.command(name="leave_team", description="Remove yourself as GM of your team")
     async def leave_team(self, interaction: discord.Interaction):
         """Leave current team"""
-        teams = load_json(TEAMS_FILE)
         settings = load_json(SETTINGS_FILE)
         
         # Check if free agency has started
@@ -549,18 +583,13 @@ class FAGMCommands(app_commands.Group):
             await interaction.response.send_message("❌ Cannot leave team after free agency has started!", ephemeral=True)
             return
         
-        # Find user's team
-        user_team = None
-        for team_name, data in teams.items():
-            if data["gm_id"] == interaction.user.id:
-                user_team = team_name
-                break
-        
+        user_team, _ = get_user_team(interaction.user.id)
         if not user_team:
             await interaction.response.send_message("❌ You are not assigned to any team.", ephemeral=True)
             return
         
         # Remove GM
+        teams = load_json(TEAMS_FILE)
         teams[user_team]["gm_id"] = None
         teams[user_team]["gm_name"] = None
         save_json(TEAMS_FILE, teams)
@@ -619,12 +648,8 @@ class FAGMCommands(app_commands.Group):
         """View detailed player information"""
         free_agents = load_json(FREE_AGENTS_FILE)
         
-        # Find player
-        player = None
-        for player_id, p in free_agents.items():
-            if p["name"].lower() == player_name.lower():
-                player = p
-                break
+        # Find player (case-insensitive)
+        _, player = find_player(free_agents, player_name)
         
         if not player:
             await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
@@ -662,34 +687,20 @@ class FAGMCommands(app_commands.Group):
     @app_commands.command(name="offer", description="Submit contract offer to a free agent")
     async def make_offer(self, interaction: discord.Interaction, player_name: str, years: int, aav: int):
         """Submit contract offer"""
-        # Get user's team
-        teams = load_json(TEAMS_FILE)
-        settings = load_json(SETTINGS_FILE)
-        
-        user_team = None
-        for team_name, data in teams.items():
-            if data["gm_id"] == interaction.user.id:
-                user_team = team_name
-                break
-        
+        user_team, team_data = get_user_team(interaction.user.id)
         if not user_team:
             await interaction.response.send_message("❌ You are not assigned to any team.", ephemeral=True)
             return
         
+        settings = load_json(SETTINGS_FILE)
         # Check if free agency is active
         if not settings.get("fa_active", False):
             await interaction.response.send_message("❌ Free agency is not active.", ephemeral=True)
             return
         
-        # Find player
+        # Find player (case-insensitive)
         free_agents = load_json(FREE_AGENTS_FILE)
-        player = None
-        player_id = None
-        for pid, p in free_agents.items():
-            if p["name"].lower() == player_name.lower() and p["status"] == "available":
-                player = p
-                player_id = pid
-                break
+        player_id, player = find_player(free_agents, player_name, status="available")
         
         if not player:
             await interaction.response.send_message(f"❌ Player '{player_name}' not found or already signed.", ephemeral=True)
@@ -730,9 +741,6 @@ class FAGMCommands(app_commands.Group):
                     ephemeral=True
                 )
                 return
-        
-        # Get team data
-        team_data = teams[user_team]
         
         # Get market data
         market_data = load_json(MARKET_FILE)
@@ -844,9 +852,12 @@ class FAGMCommands(app_commands.Group):
         
         # Update offer status
         offers = load_json(OFFERS_FILE)
-        offer["status"] = "accepted"
-        offer["final_decision"] = "accepted"
-        save_json(OFFERS_FILE, offers)
+        if offer["id"] in offers:
+            offers[offer["id"]]["status"] = "accepted"
+            offers[offer["id"]]["final_decision"] = "accepted"
+            offers[offer["id"]]["aav"] = offer["aav"]
+            offers[offer["id"]]["years"] = offer["years"]
+            offers[offer["id"]]["total_value"] = offer["total_value"]
         
         # Update market data
         market_data = load_json(MARKET_FILE)
@@ -863,7 +874,8 @@ class FAGMCommands(app_commands.Group):
         
         log_action("signing", f"{player['name']} signed with {offer['team']}")
         
-        await thread.send(f"🎉 **SIGNING ANNOUNCEMENT** 🎉\n\n{player['name']} has officially signed with the {offer['team']}!\nContract: {offer['years']} years, ${offer['aav']:,}/year\n\nWelcome to the team!")
+        if thread:
+            await thread.send(f"🎉 **SIGNING ANNOUNCEMENT** 🎉\n\n{player['name']} has officially signed with the {offer['team']}!\nContract: {offer['years']} years, ${offer['aav']:,}/year\n\nWelcome to the team!")
     
     async def notify_gm(self, gm_id, message):
         """Send notification to GM"""
@@ -876,15 +888,7 @@ class FAGMCommands(app_commands.Group):
     @app_commands.command(name="my_offers", description="View all pending offers from your team")
     async def my_offers(self, interaction: discord.Interaction):
         """View pending offers"""
-        teams = load_json(TEAMS_FILE)
-        
-        # Find user's team
-        user_team = None
-        for team_name, data in teams.items():
-            if data["gm_id"] == interaction.user.id:
-                user_team = team_name
-                break
-        
+        user_team, _ = get_user_team(interaction.user.id)
         if not user_team:
             await interaction.response.send_message("❌ You are not assigned to any team.", ephemeral=True)
             return
@@ -918,50 +922,116 @@ class FAGMCommands(app_commands.Group):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @app_commands.command(name="budget", description="Check current cap space")
-    async def budget(self, interaction: discord.Interaction):
-        """View team budget"""
-        teams = load_json(TEAMS_FILE)
-        
-        # Find user's team
-        user_team = None
-        for team_name, data in teams.items():
-            if data["gm_id"] == interaction.user.id:
-                user_team = (team_name, data)
-                break
-        
+    @app_commands.command(name="accept_counter", description="Accept a player's counter offer")
+    async def accept_counter(self, interaction: discord.Interaction, player_name: str):
+        """Accept a counter offer from a free agent"""
+        user_team, _ = get_user_team(interaction.user.id)
         if not user_team:
             await interaction.response.send_message("❌ You are not assigned to any team.", ephemeral=True)
             return
-        
-        team_name, data = user_team
-        cap_manager = CapManager(team_name)
+
+        # Check free agency is active
+        settings = load_json(SETTINGS_FILE)
+        if not settings.get("fa_active", False):
+            await interaction.response.send_message("❌ Free agency is not active.", ephemeral=True)
+            return
+
+        # Find the player (case-insensitive)
+        free_agents = load_json(FREE_AGENTS_FILE)
+        player_id, player = find_player(free_agents, player_name)
+
+        if not player:
+            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+            return
+
+        if player["status"] != "available":
+            await interaction.response.send_message(f"❌ {player['name']} is no longer available.", ephemeral=True)
+            return
+
+        # Find the pending offer from this GM for this player
+        offers = load_json(OFFERS_FILE)
+        target_offer = None
+        target_offer_id = None
+        for offer_id, offer in offers.items():
+            if (offer["team"] == user_team and
+                    offer["player_id"] == player_id and
+                    offer["status"] == "pending"):
+                target_offer = offer
+                target_offer_id = offer_id
+                break
+
+        if not target_offer:
+            await interaction.response.send_message(
+                f"❌ You have no pending offer for {player['name']}. Submit one with `/fa offer` first.",
+                ephemeral=True
+            )
+            return
+
+        # Check there is actually a counter offer to accept
+        counters = target_offer.get("counter_offers", [])
+        if not counters:
+            await interaction.response.send_message(
+                f"❌ {player['name']} has not countered your offer yet.",
+                ephemeral=True
+            )
+            return
+
+        # Take the latest counter
+        latest_counter = counters[-1]
+        counter_aav = latest_counter["aav"]
+        counter_years = latest_counter["years"]
+
+        # Check cap space for the new amount
+        cap_manager = CapManager(user_team)
+        # Available cap currently has the original offer reserved; check if counter fits
+        current_offer_aav = target_offer["aav"]
+        extra_needed = counter_aav - current_offer_aav
         available = cap_manager.get_available_cap()
-        
+        if extra_needed > available:
+            await interaction.response.send_message(
+                f"❌ Not enough cap space. Counter requires ${counter_aav:,}/yr but you only have ${available + current_offer_aav:,} available.",
+                ephemeral=True
+            )
+            return
+
+        # Update offer terms to the counter's terms
+        target_offer["aav"] = counter_aav
+        target_offer["years"] = counter_years
+        target_offer["total_value"] = counter_aav * counter_years
+
+        # Find the negotiation thread
+        negotiations = load_json(NEGOTIATIONS_FILE)
+        thread = None
+        if target_offer_id in negotiations:
+            try:
+                thread_id = negotiations[target_offer_id]["thread_id"]
+                thread = await interaction.client.fetch_channel(thread_id)
+            except Exception:
+                thread = None
+
+        # Process the signing
+        await self.process_signing(interaction, target_offer, player, thread)
+
         embed = discord.Embed(
-            title=f"💰 {team_name} Budget",
+            title="🤝 Counter Offer Accepted!",
+            description=f"You accepted **{player['name']}**'s counter offer.",
             color=discord.Color.green()
         )
-        embed.add_field(name="Total Cap Space", value=f"${data['cap_space']:,}", inline=True)
-        embed.add_field(name="Available Cap", value=f"${available:,}", inline=True)
-        embed.add_field(name="Pending Offers", value=f"${data['cap_space'] - available:,}", inline=True)
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
+        embed.add_field(name="Team", value=user_team, inline=True)
+        embed.add_field(name="Years", value=str(counter_years), inline=True)
+        embed.add_field(name="AAV", value=f"${counter_aav:,}/yr", inline=True)
+        embed.add_field(name="Total Value", value=f"${counter_aav * counter_years:,}", inline=True)
+
+        await interaction.response.send_message(embed=embed)
+
     @app_commands.command(name="compare", description="Compare two free agents side-by-side")
     async def compare_players(self, interaction: discord.Interaction, player1: str, player2: str):
         """Compare two players"""
         free_agents = load_json(FREE_AGENTS_FILE)
         
-        # Find players
-        p1 = None
-        p2 = None
-        
-        for pid, p in free_agents.items():
-            if p["name"].lower() == player1.lower():
-                p1 = p
-            if p["name"].lower() == player2.lower():
-                p2 = p
+        # Find players (case-insensitive)
+        _, p1 = find_player(free_agents, player1)
+        _, p2 = find_player(free_agents, player2)
         
         if not p1 or not p2:
             await interaction.response.send_message("❌ One or both players not found.", ephemeral=True)
@@ -989,17 +1059,7 @@ class FAGMCommands(app_commands.Group):
     @app_commands.command(name="recommended", description="Get AI-suggested targets for your team")
     async def recommended(self, interaction: discord.Interaction):
         """Get recommended free agents"""
-        teams = load_json(TEAMS_FILE)
-        
-        # Find user's team
-        user_team = None
-        team_data = None
-        for team_name, data in teams.items():
-            if data["gm_id"] == interaction.user.id:
-                user_team = team_name
-                team_data = data
-                break
-        
+        user_team, team_data = get_user_team(interaction.user.id)
         if not user_team:
             await interaction.response.send_message("❌ You are not assigned to any team.", ephemeral=True)
             return
@@ -1051,12 +1111,135 @@ class FAGMCommands(app_commands.Group):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @app_commands.command(name="shortlist", description="Manage your player shortlist")
-    async def shortlist(self, interaction: discord.Interaction, action: str, player_name: Optional[str] = None):
-        """Add/remove/view shortlisted players"""
-        # This would require storing user-specific shortlists
-        # For now, just a placeholder
-        await interaction.response.send_message("Shortlist feature coming soon!", ephemeral=True)
+    @app_commands.command(name="negotiations", description="See your active negotiation threads")
+    async def negotiations(self, interaction: discord.Interaction):
+        """List active negotiation threads for this GM's team"""
+        user_team, _ = get_user_team(interaction.user.id)
+        if not user_team:
+            await interaction.response.send_message("❌ You are not assigned to any team.", ephemeral=True)
+            return
+
+        offers = load_json(OFFERS_FILE)
+        negotiations = load_json(NEGOTIATIONS_FILE)
+
+        active = []
+        for offer_id, offer in offers.items():
+            if offer["team"] == user_team and offer["status"] == "pending":
+                neg = negotiations.get(offer_id)
+                thread_mention = f"<#{neg['thread_id']}>" if neg else "*(thread unavailable)*"
+                counters = offer.get("counter_offers", [])
+                last_counter = counters[-1] if counters else None
+                active.append((offer, thread_mention, last_counter))
+
+        if not active:
+            await interaction.response.send_message("You have no active negotiations.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"🤝 Active Negotiations — {user_team}",
+            color=discord.Color.blue()
+        )
+
+        for offer, thread_mention, last_counter in active:
+            expires = datetime.fromisoformat(offer["expires"])
+            hours_left = max(0, int((expires - datetime.now()).total_seconds() / 3600))
+            counter_text = f"\n**Latest Counter:** {last_counter['years']} yrs / ${last_counter['aav']:,}/yr" if last_counter else ""
+            embed.add_field(
+                name=f"{offer['player_name']}",
+                value=(
+                    f"Your offer: {offer['years']} yrs / ${offer['aav']:,}/yr\n"
+                    f"Score: {offer['decision_score']:.1%} | Expires in {hours_left}h"
+                    f"{counter_text}\n{thread_mention}"
+                ),
+                inline=False
+            )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="status", description="View current free agency stage and timeline")
+    async def status(self, interaction: discord.Interaction):
+        """Show current FA stage and settings"""
+        settings = load_json(SETTINGS_FILE)
+        market_data = load_json(MARKET_FILE)
+
+        stage = settings.get("current_stage", "pre_free_agency")
+        fa_active = settings.get("fa_active", False)
+        stage_start = settings.get("stage_start_time")
+        deadline = settings.get("stage_deadline")
+
+        stage_labels = {
+            "pre_free_agency":  "Pre-Free Agency",
+            "open_negotiations": "Open Negotiations",
+            "closing_stage":    "Closing Stage",
+            "signing_period":   "Signing Period",
+            "closed":           "Closed",
+        }
+
+        embed = discord.Embed(
+            title="📅 Free Agency Status",
+            color=discord.Color.gold() if fa_active else discord.Color.greyple()
+        )
+        embed.add_field(name="Stage", value=stage_labels.get(stage, stage), inline=True)
+        embed.add_field(name="FA Active", value="✅ Yes" if fa_active else "❌ No", inline=True)
+        embed.add_field(name="Demand Multiplier", value=f"{market_data.get('stage_multiplier', 1.0):.2f}x", inline=True)
+
+        if stage_start:
+            embed.add_field(name="Stage Started", value=stage_start[:19].replace("T", " "), inline=True)
+
+        if deadline:
+            deadline_dt = datetime.fromisoformat(deadline)
+            hours_left = max(0, int((deadline_dt - datetime.now()).total_seconds() / 3600))
+            embed.add_field(name="Deadline", value=f"{deadline[:19].replace('T', ' ')} ({hours_left}h left)", inline=True)
+
+        embed.add_field(
+            name="Market",
+            value=(
+                f"Temperature: {market_data.get('market_temperature', 'Cold')}\n"
+                f"Total Offers: {market_data.get('total_offers_made', 0)}\n"
+                f"Total Signings: {market_data.get('total_signings', 0)}"
+            ),
+            inline=False
+        )
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="standings", description="View all teams with records and tiers")
+    async def standings(self, interaction: discord.Interaction):
+        """Show all teams ranked by win percentage"""
+        teams = load_json(TEAMS_FILE)
+
+        teams_with_records = [
+            (name, data) for name, data in teams.items()
+            if data.get("wins", 0) + data.get("losses", 0) > 0
+        ]
+        teams_without = [
+            (name, data) for name, data in teams.items()
+            if data.get("wins", 0) + data.get("losses", 0) == 0
+        ]
+
+        teams_with_records.sort(key=lambda x: x[1].get("win_percentage", 0), reverse=True)
+
+        embed = discord.Embed(
+            title="🏆 Standings",
+            color=discord.Color.gold()
+        )
+
+        if teams_with_records:
+            lines = []
+            for i, (name, data) in enumerate(teams_with_records, 1):
+                tier = get_team_tier(data.get("win_percentage", 0))
+                tier_icons = {"Elite": "🔥", "Contender": "⭐", "Competitive": "✅", "Rebuilding": "🔨"}
+                icon = tier_icons.get(tier, "")
+                lines.append(
+                    f"{i}. {icon} **{name}** — {data['wins']}-{data['losses']} ({data['win_percentage']:.3f}) | {tier}"
+                )
+            embed.add_field(name="Teams (by Win %)", value="\n".join(lines[:25]), inline=False)
+
+        if teams_without:
+            no_record = ", ".join(name for name, _ in teams_without)
+            embed.add_field(name="No Record Set", value=no_record, inline=False)
+
+        await interaction.response.send_message(embed=embed)
 
 # Admin Commands Group
 class FAAdminCommands(app_commands.Group):
@@ -1068,16 +1251,16 @@ class FAAdminCommands(app_commands.Group):
     @app_commands.command(name="set_team", description="Set cap space and record for a team")
     async def set_team(self, interaction: discord.Interaction, team_name: str, cap_space: int, record: str):
         """Set team cap and record"""
-        # Check admin permission
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+        if not await check_admin(interaction):
             return
         
         teams = load_json(TEAMS_FILE)
         
-        if team_name not in teams:
+        canonical = find_team_name(teams, team_name)
+        if not canonical:
             await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
             return
+        team_name = canonical
         
         # Parse record (e.g., "95-67")
         try:
@@ -1130,8 +1313,7 @@ class FAAdminCommands(app_commands.Group):
     @app_commands.command(name="add_fa", description="Add a free agent with random personality")
     async def add_fa(self, interaction: discord.Interaction, name: str, age: int, ovr: int, position: str):
         """Add free agent"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+        if not await check_admin(interaction):
             return
         
         # Validate OVR
@@ -1199,8 +1381,7 @@ class FAAdminCommands(app_commands.Group):
     @app_commands.command(name="add_fa_custom", description="Add a free agent with specific personality")
     async def add_fa_custom(self, interaction: discord.Interaction, name: str, age: int, ovr: int, position: str, personality: str):
         """Add free agent with custom personality"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+        if not await check_admin(interaction):
             return
         
         # Validate personality
@@ -1252,8 +1433,7 @@ class FAAdminCommands(app_commands.Group):
     @app_commands.command(name="start_period", description="Begin free agency")
     async def start_period(self, interaction: discord.Interaction):
         """Start free agency"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+        if not await check_admin(interaction):
             return
         
         settings = load_json(SETTINGS_FILE)
@@ -1283,8 +1463,7 @@ class FAAdminCommands(app_commands.Group):
     @app_commands.command(name="advance_stage", description="Advance to next free agency stage")
     async def advance_stage(self, interaction: discord.Interaction):
         """Advance FA stage"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+        if not await check_admin(interaction):
             return
         
         settings = load_json(SETTINGS_FILE)
@@ -1311,32 +1490,321 @@ class FAAdminCommands(app_commands.Group):
         else:
             await interaction.response.send_message("❌ Free agency is already closed.", ephemeral=True)
     
-    @app_commands.command(name="view_fa", description="View all free agents")
-    async def view_fa(self, interaction: discord.Interaction):
-        """View all free agents"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+    @app_commands.command(name="reset_teams", description="Reset all team caps and records for a new FA class")
+    async def reset_teams(self, interaction: discord.Interaction):
+        """Reset all team caps and records"""
+        if not await check_admin(interaction):
             return
-        
+
+        teams = load_json(TEAMS_FILE)
+        for team in teams.values():
+            team["cap_space"] = 0
+            team["wins"] = 0
+            team["losses"] = 0
+            team["win_percentage"] = 0
+        save_json(TEAMS_FILE, teams)
+        log_action("admin_reset_teams", "All teams reset")
+        await interaction.response.send_message("✅ All team caps and records have been reset.")
+
+    @app_commands.command(name="assign_gm", description="Manually assign a GM to a team")
+    async def assign_gm(self, interaction: discord.Interaction, team_name: str, user: discord.Member):
+        """Manually assign GM"""
+        if not await check_admin(interaction):
+            return
+
+        teams = load_json(TEAMS_FILE)
+        canonical = find_team_name(teams, team_name)
+        if not canonical:
+            await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
+            return
+
+        # Remove user from any existing team
+        for t, data in teams.items():
+            if data["gm_id"] == user.id:
+                teams[t]["gm_id"] = None
+                teams[t]["gm_name"] = None
+
+        teams[canonical]["gm_id"] = user.id
+        teams[canonical]["gm_name"] = str(user)
+        save_json(TEAMS_FILE, teams)
+        log_action("admin_assign_gm", f"{user} assigned to {canonical}")
+        await interaction.response.send_message(f"✅ {user.mention} is now GM of the **{canonical}**.")
+
+    @app_commands.command(name="unassign_gm", description="Remove a GM from a team")
+    async def unassign_gm(self, interaction: discord.Interaction, team_name: str):
+        """Remove GM from team"""
+        if not await check_admin(interaction):
+            return
+
+        teams = load_json(TEAMS_FILE)
+        canonical = find_team_name(teams, team_name)
+        if not canonical:
+            await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
+            return
+
+        old_gm = teams[canonical].get("gm_name", "None")
+        teams[canonical]["gm_id"] = None
+        teams[canonical]["gm_name"] = None
+        save_json(TEAMS_FILE, teams)
+        log_action("admin_unassign_gm", f"Removed GM from {canonical} (was {old_gm})")
+        await interaction.response.send_message(f"✅ GM removed from **{canonical}** (was {old_gm}).")
+
+    @app_commands.command(name="remove_fa", description="Remove a free agent from the pool")
+    async def remove_fa(self, interaction: discord.Interaction, player_name: str):
+        """Remove a free agent"""
+        if not await check_admin(interaction):
+            return
+
         free_agents = load_json(FREE_AGENTS_FILE)
-        
-        embed = discord.Embed(
-            title="📊 All Free Agents",
-            color=discord.Color.blue()
+        player_id, player = find_player(free_agents, player_name)
+        if not player:
+            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+            return
+
+        del free_agents[player_id]
+        save_json(FREE_AGENTS_FILE, free_agents)
+        log_action("admin_remove_fa", f"Removed {player['name']}")
+        await interaction.response.send_message(f"✅ **{player['name']}** removed from the FA pool.")
+
+    @app_commands.command(name="edit_fa", description="Edit a free agent's OVR, age, position, or personality")
+    async def edit_fa(self, interaction: discord.Interaction, player_name: str, field: str, value: str):
+        """Edit a free agent attribute"""
+        if not await check_admin(interaction):
+            return
+
+        valid_fields = ["ovr", "age", "position", "personality"]
+        if field.lower() not in valid_fields:
+            await interaction.response.send_message(
+                f"❌ Invalid field. Choose from: {', '.join(valid_fields)}", ephemeral=True
+            )
+            return
+
+        free_agents = load_json(FREE_AGENTS_FILE)
+        player_id, player = find_player(free_agents, player_name)
+        if not player:
+            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+            return
+
+        field = field.lower()
+        old_value = player.get(field)
+
+        try:
+            if field in ["ovr", "age"]:
+                player[field] = int(value)
+                if field == "ovr":
+                    salary_range = get_salary_range(player["ovr"])
+                    player["min_salary"] = salary_range["min"]
+                    player["max_salary"] = salary_range["max"]
+                    player["market_value"] = (salary_range["min"] + salary_range["max"]) // 2
+                    player["scarcity_multiplier"] = get_position_scarcity_multiplier(player["position"])
+                if field == "age":
+                    ideal = calculate_ideal_length(player["age"], player["personality"])
+                    player["ideal_length_min"] = ideal["min"]
+                    player["ideal_length_max"] = ideal["max"]
+            elif field == "personality":
+                valid_personalities = ["Win-Now", "Contender Seeker", "Balanced", "Loyalist",
+                                       "Patient", "Hardball", "Money-Focused", "Mercenary"]
+                matched = next((p for p in valid_personalities if p.lower() == value.lower()), None)
+                if not matched:
+                    await interaction.response.send_message(
+                        f"❌ Invalid personality. Choose from: {', '.join(valid_personalities)}", ephemeral=True
+                    )
+                    return
+                player["personality"] = matched
+                ideal = calculate_ideal_length(player["age"], matched)
+                player["ideal_length_min"] = ideal["min"]
+                player["ideal_length_max"] = ideal["max"]
+            else:
+                player[field] = value
+                if field == "position":
+                    player["scarcity_multiplier"] = get_position_scarcity_multiplier(value)
+
+            player["updated_at"] = datetime.now().isoformat()
+            save_json(FREE_AGENTS_FILE, free_agents)
+            log_action("admin_edit_fa", f"Edited {player['name']}: {field} {old_value} → {player[field]}")
+            await interaction.response.send_message(
+                f"✅ Updated **{player['name']}**: `{field}` changed from `{old_value}` → `{player[field]}`"
+            )
+        except ValueError:
+            await interaction.response.send_message(f"❌ Invalid value '{value}' for field '{field}'.", ephemeral=True)
+
+    @app_commands.command(name="clear_fa", description="Remove ALL free agents from the pool")
+    async def clear_fa(self, interaction: discord.Interaction):
+        """Remove all free agents"""
+        if not await check_admin(interaction):
+            return
+
+        free_agents = load_json(FREE_AGENTS_FILE)
+        count = len(free_agents)
+        save_json(FREE_AGENTS_FILE, {})
+        save_json(OFFERS_FILE, {})
+        save_json(NEGOTIATIONS_FILE, {})
+        log_action("admin_clear_fa", f"Cleared {count} free agents")
+        await interaction.response.send_message(f"✅ Cleared **{count}** free agents, all offers, and all negotiations.")
+
+    @app_commands.command(name="set_timeline", description="Set a deadline for the current stage")
+    async def set_timeline(self, interaction: discord.Interaction, days: int):
+        """Set stage deadline in days"""
+        if not await check_admin(interaction):
+            return
+
+        if days < 1 or days > 30:
+            await interaction.response.send_message("❌ Days must be between 1 and 30.", ephemeral=True)
+            return
+
+        deadline = (datetime.now() + timedelta(days=days)).isoformat()
+        settings = load_json(SETTINGS_FILE)
+        settings["stage_deadline"] = deadline
+        save_json(SETTINGS_FILE, settings)
+        log_action("admin_set_timeline", f"Deadline set to {days} days")
+        deadline_display = (datetime.now() + timedelta(days=days)).strftime("%B %d, %Y at %I:%M %p")
+        await interaction.response.send_message(
+            f"✅ Stage deadline set to **{days} day(s)** from now ({deadline_display})."
         )
-        
+
+    @app_commands.command(name="force_decision", description="Force an agent to decide on all pending offers")
+    async def force_decision(self, interaction: discord.Interaction, player_name: str):
+        """Force agent decision"""
+        if not await check_admin(interaction):
+            return
+
+        free_agents = load_json(FREE_AGENTS_FILE)
+        player_id, player = find_player(free_agents, player_name, status="available")
+        if not player:
+            await interaction.response.send_message(
+                f"❌ Player '{player_name}' not found or already signed.", ephemeral=True
+            )
+            return
+
+        offers = load_json(OFFERS_FILE)
+        pending = [
+            (oid, o) for oid, o in offers.items()
+            if o["player_id"] == player_id and o["status"] == "pending"
+        ]
+
+        if not pending:
+            await interaction.response.send_message(f"❌ No pending offers found for {player['name']}.", ephemeral=True)
+            return
+
+        # Pick the highest-scored offer
+        best_offer_id, best_offer = max(pending, key=lambda x: x[1].get("decision_score", 0))
+        best_score = best_offer.get("decision_score", 0)
+
+        decision_engine = DecisionEngine()
+        action = decision_engine.should_counter(best_score)
+
+        negotiations = load_json(NEGOTIATIONS_FILE)
+        thread = None
+        if best_offer_id in negotiations:
+            try:
+                thread = await interaction.client.fetch_channel(negotiations[best_offer_id]["thread_id"])
+            except Exception:
+                thread = None
+
+        if action == "accept" or best_score >= 0.10:
+            await self.process_signing(interaction, best_offer, player, thread)
+            log_action("admin_force_decision", f"Forced {player['name']} to sign with {best_offer['team']}")
+            await interaction.response.send_message(
+                f"✅ Force decision: **{player['name']}** signed with the **{best_offer['team']}**."
+            )
+        else:
+            # Reject all offers
+            for oid, o in offers.items():
+                if o["player_id"] == player_id and o["status"] == "pending":
+                    o["status"] = "rejected"
+            save_json(OFFERS_FILE, offers)
+            log_action("admin_force_decision", f"Forced {player['name']} to reject all offers")
+            await interaction.response.send_message(
+                f"⚠️ **{player['name']}** rejected all offers (no offer scored above the threshold)."
+            )
+
+    @app_commands.command(name="override_signing", description="Admin override: sign a player to a team")
+    async def override_signing(self, interaction: discord.Interaction, player_name: str, team_name: str):
+        """Force a signing regardless of offers"""
+        if not await check_admin(interaction):
+            return
+
+        free_agents = load_json(FREE_AGENTS_FILE)
+        player_id, player = find_player(free_agents, player_name)
+        if not player:
+            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+            return
+
+        teams = load_json(TEAMS_FILE)
+        canonical = find_team_name(teams, team_name)
+        if not canonical:
+            await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
+            return
+
+        player["status"] = "signed"
+        player["signed_team"] = canonical
+        player["signed_aav"] = 0
+        player["signed_years"] = 0
+        save_json(FREE_AGENTS_FILE, free_agents)
+
+        # Reject all pending offers for this player
+        offers = load_json(OFFERS_FILE)
+        for o in offers.values():
+            if o["player_id"] == player_id and o["status"] == "pending":
+                o["status"] = "rejected"
+        save_json(OFFERS_FILE, offers)
+
+        market_data = load_json(MARKET_FILE)
+        market_data["total_signings"] += 1
+        save_json(MARKET_FILE, market_data)
+
+        log_action("admin_override_signing", f"{player['name']} force-signed to {canonical}")
+        await interaction.response.send_message(
+            f"✅ **{player['name']}** has been signed to the **{canonical}** (admin override)."
+        )
+
+    @app_commands.command(name="view_class", description="View full summary of the current FA class")
+    async def view_class(self, interaction: discord.Interaction):
+        """Comprehensive FA class overview"""
+        if not await check_admin(interaction):
+            return
+
+        free_agents = load_json(FREE_AGENTS_FILE)
+        offers = load_json(OFFERS_FILE)
+        teams = load_json(TEAMS_FILE)
+        settings = load_json(SETTINGS_FILE)
+        market_data = load_json(MARKET_FILE)
+
         available = [p for p in free_agents.values() if p["status"] == "available"]
         signed = [p for p in free_agents.values() if p["status"] == "signed"]
-        
-        embed.add_field(name="Available", value=str(len(available)), inline=True)
-        embed.add_field(name="Signed", value=str(len(signed)), inline=True)
-        embed.add_field(name="Total", value=str(len(free_agents)), inline=True)
-        
+        pending_offers = [o for o in offers.values() if o["status"] == "pending"]
+        teams_with_gm = [t for t, d in teams.items() if d.get("gm_id")]
+
+        stage = settings.get("current_stage", "pre_free_agency").replace("_", " ").title()
+
+        embed = discord.Embed(
+            title="📋 Current FA Class — Full Overview",
+            color=discord.Color.purple()
+        )
+        embed.add_field(name="Stage", value=stage, inline=True)
+        embed.add_field(name="FA Active", value="✅" if settings.get("fa_active") else "❌", inline=True)
+        embed.add_field(name="Teams with GMs", value=str(len(teams_with_gm)), inline=True)
+        embed.add_field(name="Available Players", value=str(len(available)), inline=True)
+        embed.add_field(name="Signed Players", value=str(len(signed)), inline=True)
+        embed.add_field(name="Pending Offers", value=str(len(pending_offers)), inline=True)
+        embed.add_field(name="Total Offers Made", value=str(market_data.get("total_offers_made", 0)), inline=True)
+        embed.add_field(name="Total Signings", value=str(market_data.get("total_signings", 0)), inline=True)
+
         if available:
-            top_players = sorted(available, key=lambda x: x["ovr"], reverse=True)[:10]
-            top_names = "\n".join([f"{p['name']} - {p['ovr']} OVR" for p in top_players])
-            embed.add_field(name="Top Available", value=top_names, inline=False)
-        
+            top = sorted(available, key=lambda x: x["ovr"], reverse=True)[:10]
+            top_lines = "\n".join(
+                f"**{p['name']}** — {p['ovr']} OVR, {p['position']}, Age {p['age']} ({p['personality']})"
+                for p in top
+            )
+            embed.add_field(name="Top Available Players", value=top_lines, inline=False)
+
+        if signed:
+            signed_lines = "\n".join(
+                f"**{p['name']}** → {p.get('signed_team', '?')} ({p.get('signed_aav', 0):,}/yr)"
+                for p in signed[:10]
+            )
+            embed.add_field(name="Recent Signings", value=signed_lines, inline=False)
+
         await interaction.response.send_message(embed=embed)
 
 # Setup bot commands
@@ -1405,6 +1873,7 @@ async def on_interaction(interaction):
 
 # Run bot
 if __name__ == "__main__":
-    # Replace with your bot token
-    TOKEN = "YOUR_BOT_TOKEN_HERE"
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if not TOKEN:
+        raise ValueError("DISCORD_TOKEN environment variable is not set")
     bot.run(TOKEN)
