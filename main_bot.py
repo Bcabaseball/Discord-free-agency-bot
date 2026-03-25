@@ -2559,683 +2559,6 @@ class FAGMCommands(app_commands.Group):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="wish_add", description="Add a player to your wish list (max 5)")
-    @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
-    async def wish_add(self, interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        free_agents = load_json(FREE_AGENTS_FILE)
-        player_id, player = find_player(free_agents, player_name)
-        if not player:
-            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
-            return
-
-        wishlists = load_json(WISHLIST_FILE)
-        team_list = wishlists.get(user_team, [])
-
-        if player_id in team_list:
-            await interaction.response.send_message(f"**{player['name']}** is already on your wish list.", ephemeral=True)
-            return
-
-        if len(team_list) >= 5:
-            await interaction.response.send_message("❌ Wish list is full (max 5). Remove a player first with `/fa wish_remove`.", ephemeral=True)
-            return
-
-        team_list.append(player_id)
-        wishlists[user_team] = team_list
-        save_json(WISHLIST_FILE, wishlists)
-        await interaction.response.send_message(f"✅ Added **{player['name']}** to your wish list ({len(team_list)}/5).", ephemeral=True)
-
-    @app_commands.command(name="wish_remove", description="Remove a player from your wish list")
-    @app_commands.autocomplete(player_name=autocomplete_any_player, team=autocomplete_team)
-    async def wish_remove(self, interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        free_agents = load_json(FREE_AGENTS_FILE)
-        player_id, player = find_player(free_agents, player_name)
-        if not player:
-            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
-            return
-
-        wishlists = load_json(WISHLIST_FILE)
-        team_list = wishlists.get(user_team, [])
-
-        if player_id not in team_list:
-            await interaction.response.send_message(f"**{player['name']}** is not on your wish list.", ephemeral=True)
-            return
-
-        team_list.remove(player_id)
-        wishlists[user_team] = team_list
-        save_json(WISHLIST_FILE, wishlists)
-        await interaction.response.send_message(f"🗑️ Removed **{player['name']}** from your wish list.", ephemeral=True)
-
-    @app_commands.command(name="wish_list", description="View your wish list and each player's current status")
-    @app_commands.autocomplete(team=autocomplete_team)
-    async def wish_list(self, interaction: discord.Interaction, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        wishlists = load_json(WISHLIST_FILE)
-        team_list = wishlists.get(user_team, [])
-
-        if not team_list:
-            await interaction.response.send_message("📋 Your wish list is empty. Use `/fa wish_add` to track targets.", ephemeral=True)
-            return
-
-        free_agents = load_json(FREE_AGENTS_FILE)
-        offers = load_json(OFFERS_FILE)
-        embed = discord.Embed(title=f"📋 {user_team} Wish List", color=discord.Color.blue())
-
-        for pid in team_list:
-            player = free_agents.get(pid)
-            if not player:
-                embed.add_field(name="Unknown Player", value="*(no longer in system)*", inline=False)
-                continue
-
-            status = player["status"]
-            if status == "signed":
-                val = f"✍️ Signed with **{player.get('signed_team', '?')}** — ${player.get('signed_aav', 0):,}/yr × {player.get('signed_years', 0)}yr"
-            else:
-                active_bids = sum(1 for o in offers.values() if o["player_id"] == pid and o["status"] == "pending")
-                your_bid = any(o["team"] == user_team and o["player_id"] == pid and o["status"] == "pending" for o in offers.values())
-                bid_note = f" | **{active_bids}** bid(s)" + (" ✅ *You have an offer in*" if your_bid else "")
-                val = f"🟢 Available — OVR {player['ovr']} | {player['position']} | Age {player['age']}{bid_note}"
-
-            embed.add_field(name=player["name"], value=val, inline=False)
-
-        embed.set_footer(text=f"{len(team_list)}/5 slots used")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="cap_breakdown", description="Detailed cap space breakdown for your team")
-    @app_commands.autocomplete(team=autocomplete_team)
-    async def cap_breakdown(self, interaction: discord.Interaction, team: Optional[str] = None):
-        user_team, team_data, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        free_agents = load_json(FREE_AGENTS_FILE)
-        signed = sorted(
-            [p for p in free_agents.values() if p.get("signed_team") == user_team and p["status"] == "signed"],
-            key=lambda x: x.get("signed_aav", 0), reverse=True
-        )
-
-        total_aav = sum(p.get("signed_aav", 0) for p in signed)
-        total_years = sum(p.get("signed_years", 0) for p in signed)
-        remaining_cap = team_data.get("cap_space", 0)
-        original_cap = total_aav + remaining_cap
-
-        embed = discord.Embed(title=f"💰 {user_team} — Cap Breakdown", color=discord.Color.gold())
-        embed.add_field(name="Total Cap", value=f"${original_cap:,}", inline=True)
-        embed.add_field(name="Committed AAV", value=f"${total_aav:,}", inline=True)
-        embed.add_field(name="Remaining", value=f"${remaining_cap:,}", inline=True)
-        embed.add_field(name="Signings", value=str(len(signed)), inline=True)
-        embed.add_field(name="Total Years", value=str(total_years), inline=True)
-        embed.add_field(name="Avg AAV/Player", value=f"${total_aav // len(signed):,}" if signed else "$0", inline=True)
-
-        if signed:
-            player_lines = []
-            for p in signed:
-                pct = (p.get("signed_aav", 0) / total_aav * 100) if total_aav else 0
-                bar_len = int(pct / 5)
-                bar = "█" * bar_len + "░" * (20 - bar_len)
-                player_lines.append(
-                    f"**{p['name']}** ({player_position_display(p)}) — ${p.get('signed_aav', 0):,}/yr × {p.get('signed_years', 0)}yr  `{pct:.1f}%`\n`{bar}`"
-                )
-            embed.add_field(name="Contracts", value="\n".join(player_lines[:8]), inline=False)
-            if len(signed) > 8:
-                embed.set_footer(text=f"Showing top 8 of {len(signed)} contracts")
-        else:
-            embed.description = "No players signed yet."
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="gauge_interest", description="Get a sense of what a player is looking for before making a formal offer")
-    @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
-    async def gauge_interest(self, interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
-        user_team, team_data, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        settings = load_json(SETTINGS_FILE)
-        if not settings.get("fa_active", False):
-            await interaction.response.send_message("❌ Free agency is not active.", ephemeral=True)
-            return
-
-        free_agents = load_json(FREE_AGENTS_FILE)
-        player_id = None
-        for pid, p in free_agents.items():
-            if p["name"].lower() == player_name.lower() and p["status"] == "available":
-                player_id = pid
-                break
-
-        if not player_id:
-            await interaction.response.send_message(f"❌ **{player_name}** is not available.", ephemeral=True)
-            return
-
-        player = free_agents[player_id]
-        personality = player["personality"]
-        weights = get_personality_weights(personality)
-        win_pct = team_data.get("win_percentage", 0.500)
-
-        priority_labels = {
-            "money": "💰 Contract AAV",
-            "length": "📅 Contract length",
-            "contention": "🏆 Winning / contention"
-        }
-        sorted_weights = sorted(weights.items(), key=lambda x: x[1], reverse=True)
-
-        priority_lines = []
-        for i, (key, val) in enumerate(sorted_weights):
-            rank = ["1st", "2nd", "3rd"][i]
-            bar = "█" * round(val * 10)
-            priority_lines.append(f"{rank} priority — {priority_labels[key]}: {bar} ({val:.0%})")
-
-        length_hint = f"{player['ideal_length_min']}–{player['ideal_length_max']} years"
-
-        contention_bonus = calculate_contention_bonus(win_pct)
-        if contention_bonus >= 0.15:
-            contention_fit = "✅ Strong fit — your team's record appeals to this player"
-        elif contention_bonus >= 0.08:
-            contention_fit = "🟡 Decent fit — your team is competitive but not elite"
-        else:
-            contention_fit = "🔴 Weak fit — this player wants a contending team, yours may not qualify"
-
-        personality_hints = {
-            "Win-Now":          "Wants to compete immediately. Ring potential matters as much as money.",
-            "Contender Seeker": "Primarily looking for a chance to win. Will accept less money for a playoff team.",
-            "Balanced":         "Looking for a fair deal across money, years, and winning potential.",
-            "Loyalist":         "Values long-term commitment above all. Offer years generously.",
-            "Patient":          "Wants security — a long deal is more important than AAV.",
-            "Hardball":         "Expects top-of-market money and will not negotiate easily.",
-            "Money-Focused":    "The AAV is everything. Get it close to market value to even get in the room.",
-            "Mercenary":        "Goes to the highest bidder, plain and simple. Competing offers drive this player.",
-        }
-
-        embed = discord.Embed(
-            title=f"🔍 Gauging Interest — {player['name']}",
-            description=f"*{personality_hints.get(personality, '')}*",
-            color=discord.Color.teal()
-        )
-        embed.add_field(name="Personality", value=personality, inline=True)
-        embed.add_field(name="Position / OVR", value=f"{player['position']} | OVR {player['overall']}", inline=True)
-        embed.add_field(name="Preferred Length", value=length_hint, inline=True)
-        embed.add_field(name="Priority Weights", value="\n".join(priority_lines), inline=False)
-        embed.add_field(name="Your Team's Contention Appeal", value=contention_fit, inline=False)
-
-        offer_count = player.get("offer_count", 0)
-        if offer_count >= 2:
-            embed.add_field(
-                name="⚡ Market Activity",
-                value=f"{offer_count} teams are already in pursuit. Expect a competitive negotiation.",
-                inline=False
-            )
-
-        embed.set_footer(text="This is informal intel — exact salary expectations are revealed during negotiation.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="save_template", description="Save a contract template for quick reuse (e.g., 4yr/$20M)")
-    @app_commands.autocomplete(team=autocomplete_team)
-    async def save_template(self, interaction: discord.Interaction, template_name: str, years: int, aav: int, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        if len(template_name) > 20:
-            await interaction.response.send_message("❌ Template name must be 20 characters or less.", ephemeral=True)
-            return
-
-        save_offer_template(interaction.user.id, user_team, template_name, years, aav)
-
-        embed = discord.Embed(
-            title="💾 Template Saved",
-            description=f"Template **{template_name}** saved for {user_team}",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Terms", value=f"{years} years @ ${aav:,}/yr", inline=False)
-        embed.add_field(name="Tip", value=f"Load it later with `/fa load_template {template_name}`", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="load_template", description="Load a saved contract template and see its terms")
-    @app_commands.autocomplete(team=autocomplete_team)
-    async def load_template(self, interaction: discord.Interaction, template_name: str, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        template = load_offer_template(interaction.user.id, user_team, template_name)
-        if not template:
-            await interaction.response.send_message(f"❌ Template '{template_name}' not found.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="📋 Template Details",
-            description=f"**{template_name}**",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Years", value=template["years"], inline=True)
-        embed.add_field(name="AAV", value=f"${template['aav']:,}", inline=True)
-        embed.add_field(name="Total Value", value=f"${template['aav'] * template['years']:,}", inline=True)
-        embed.add_field(name="How to Use", value=f"When making an offer: `/fa offer <player> {template['years']} {template['aav']}`", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="list_templates", description="View all your saved offer templates")
-    @app_commands.autocomplete(team=autocomplete_team)
-    async def list_templates(self, interaction: discord.Interaction, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        templates = list_offer_templates(interaction.user.id, user_team)
-        if not templates:
-            await interaction.response.send_message(f"❌ You have no saved templates for {user_team}. Use `/fa save_template` to create one.", ephemeral=True)
-            return
-
-        rows = [
-            f"**{name}** — {t['years']}yr @ ${t['aav']:,}/yr (${t['aav'] * t['years']:,} total)"
-            for name, t in templates.items()
-        ]
-
-        pages = make_pages(f"📋 Templates — {user_team}", discord.Color.blue(), rows, per_page=10)
-        view = PaginatorView(pages) if len(pages) > 1 else None
-        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
-
-    @app_commands.command(name="counter_apology", description="Apologize to a ghosted player and regain offer rights (tiers: simple, heartfelt, premium)")
-    @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
-    async def counter_apology(self, interaction: discord.Interaction, player_name: str, apology_level: str = "simple", team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        if apology_level not in ["simple", "heartfelt", "premium"]:
-            await interaction.response.send_message(
-                "❌ Apology level must be: `simple` (30% success), `heartfelt` (65% success), or `premium` (95% success)",
-                ephemeral=True
-            )
-            return
-
-        free_agents = load_json(FREE_AGENTS_FILE)
-        player_id, player = find_player(free_agents, player_name)
-
-        if not player:
-            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
-            return
-
-        if not is_team_ghosted(player_id, user_team):
-            await interaction.response.send_message(
-                f"❌ {user_team} is not ghosted by {player['name']}. You can submit offers normally.", ephemeral=True
-            )
-            return
-
-        # Check apology cooldown (can't spam apologies)
-        ghostlist = load_json(GHOSTLIST_FILE)
-        status = ghostlist.get(player_id, {}).get(user_team, {})
-        last_apology_field = f"last_apology_{apology_level}"
-        
-        if last_apology_field in status:
-            last_time = datetime.fromisoformat(status[last_apology_field])
-            cooldown_hours = {"simple": 2, "heartfelt": 6, "premium": 12}[apology_level]
-            hours_passed = (datetime.now() - last_time).total_seconds() / 3600
-            if hours_passed < cooldown_hours:
-                remaining = cooldown_hours - hours_passed
-                await interaction.response.send_message(
-                    f"⏳ {user_team}, {player['name']}'s agent won't hear another apology for {int(remaining)}h. Give it time.",
-                    ephemeral=True
-                )
-                return
-
-        # Success rate based on tier
-        success_rates = {"simple": 0.30, "heartfelt": 0.65, "premium": 0.95}
-        success = random.random() < success_rates[apology_level]
-
-        apology_messages = {
-            "simple": {
-                "your_message": "We made a mistake on our last offer. Let's try again.",
-                "accept": "The agent nods: 'Apology accepted. You get one more shot.'",
-                "reject": "The agent shakes their head: 'Words aren't enough. Show me the money.'"
-            },
-            "heartfelt": {
-                "your_message": "We disrespected your client with that lowball. Our organization values respect and fairness. Let's discuss what your client truly deserves.",
-                "accept": "The agent is moved: 'Alright, I see the sincerity. You're back in the bidding.'",
-                "reject": "The agent remains unmoved: 'Apologies are nice, but actions speak louder. Come back with a real offer.'"
-            },
-            "premium": {
-                "your_message": "I owe you a sincere apology on behalf of the entire organization. Your client is elite talent and deserves elite respect and compensation. We're ready to prove it.",
-                "accept": "The agent is impressed: 'That's the level of respect my client deserves. Welcome back.'",
-                "reject": "Even the agent seems surprised you failed: 'That was a hell of an apology, but my client wants to move on.'"
-            }
-        }
-
-        messages = apology_messages[apology_level]
-        cost = {"simple": 0, "heartfelt": 50000, "premium": 250000}[apology_level]
-
-        if success:
-            unghost_team(player_id, user_team)
-            record_apology_attempt(player_id, user_team, apology_level)
-            log_action("counter_apology_success", f"{user_team} successfully apologized to {player['name']} ({apology_level})")
-
-            embed = discord.Embed(
-                title="🤝 Apology Accepted!",
-                description=f"You've regained the right to submit offers to **{player['name']}**.",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Your Message", value=f"*{messages['your_message']}*", inline=False)
-            embed.add_field(name="Agent Response", value=messages['accept'], inline=False)
-            if cost > 0:
-                embed.add_field(name="Apology Cost", value=f"*Gestures of goodwill: ${cost:,} cap penalty*", inline=False)
-            embed.add_field(name="Next Steps", value=f"Use `/fa offer {player['name']} <years> <aav>` to submit a serious offer.", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-            # Try to notify player via thread if exists
-            negotiations = load_json(NEGOTIATIONS_FILE)
-            for neg in negotiations.values():
-                if neg.get("player") == player["name"] and neg.get("team") == user_team:
-                    try:
-                        thread = await interaction.client.fetch_channel(neg["thread_id"])
-                        await thread.send(f"📨 **{user_team}** has formally apologized for previous lowball offers and is back in serious negotiations!")
-                    except Exception:
-                        pass
-                    break
-        else:
-            record_apology_attempt(player_id, user_team, apology_level)
-            log_action("counter_apology_failed", f"{user_team}'s apology to {player['name']} was rejected ({apology_level})")
-
-            embed = discord.Embed(
-                title="😔 Apology Declined",
-                description=f"Your apology was not accepted by {player['name']}'s agent.",
-                color=discord.Color.red()
-            )
-            embed.add_field(name="Your Message", value=f"*{messages['your_message']}*", inline=False)
-            embed.add_field(name="Agent Response", value=messages['reject'], inline=False)
-            embed.add_field(name="Try Again", value=f"You can attempt another apology in a few hours. Consider escalating to a {['heartfelt', 'premium', 'premium'][['simple', 'heartfelt', 'premium'].index(apology_level)]} apology next time.", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="offer_history", description="View full history of all offers in negotiation")
-    @app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
-    async def offer_history(self, interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        free_agents = load_json(FREE_AGENTS_FILE)
-        player_id, player = find_player(free_agents, player_name)
-
-        if not player:
-            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
-            return
-
-        offers = load_json(OFFERS_FILE)
-        player_offers = [o for o in offers.values() if o["player_id"] == player_id]
-
-        if not player_offers:
-            await interaction.response.send_message(f"❌ No offers for {player['name']}.", ephemeral=True)
-            return
-
-        # Sort by timestamp ascending (oldest first)
-        player_offers.sort(key=lambda o: o.get("timestamp", ""), reverse=False)
-
-        rows = []
-        for i, o in enumerate(player_offers, 1):
-            ts = o.get("timestamp", "?")
-            try:
-                dt = datetime.fromisoformat(ts)
-                time_str = dt.strftime("%m/%d %H:%M")
-            except:
-                time_str = ts[:16]
-
-            status_icon = "✅" if o["status"] == "accepted" else "❌" if o["status"] == "rejected" else "⏳"
-            counter_count = len(o.get("counter_offers", []))
-            counter_badge = f" [{counter_count} counters]" if counter_count > 0 else ""
-            
-            rows.append(
-                f"{i}. **{o['team']}** {status_icon} — {o['years']}yr @ ${o['aav']:,}/yr | {time_str}{counter_badge}"
-            )
-
-        pages = make_pages(f"📜 Offer History — {player['name']}", discord.Color.orange(), rows, per_page=15)
-        view = PaginatorView(pages) if len(pages) > 1 else None
-        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
-
-    @app_commands.command(name="budget_strategy", description="Set your team's negotiation strategy: spender, balanced, or saver")
-    @app_commands.autocomplete(team=autocomplete_team)
-    async def budget_strategy(self, interaction: discord.Interaction, strategy: str, team: Optional[str] = None):
-        user_team, _, err = resolve_gm_team(interaction.user.id, team)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-
-        if strategy not in ["spender", "balanced", "saver"]:
-            await interaction.response.send_message(
-                "❌ Strategy must be one of: `spender`, `balanced`, or `saver`",
-                ephemeral=True
-            )
-            return
-
-        set_budget_strategy(interaction.user.id, user_team, strategy)
-        log_action("budget_strategy_set", f"{user_team} set strategy to {strategy}")
-
-        strategy_descriptions = {
-            "spender": {
-                "emoji": "💸",
-                "desc": "Counter aggressively even on weak offers (≥15% score). Build a bidding war.",
-                "playstyle": "High-risk, high-reward. You'll counter a lot but might overpay.",
-                "best_for": "Teams willing to spend big and drive up prices."
-            },
-            "balanced": {
-                "emoji": "⚖️",
-                "desc": "Counter strategically on moderate offers (≥25% score). Balance risk/reward.",
-                "playstyle": "Default approach. Counter quality opportunities without overextending.",
-                "best_for": "Teams looking for value deals with reasonable counteroffering."
-            },
-            "saver": {
-                "emoji": "🏦",
-                "desc": "Only counter on strong offers (≥35% score). Preserve cap space.",
-                "playstyle": "Conservative. You'll make fewer offers but stay cap-friendly.",
-                "best_for": "Teams building slowly with patient, selective signings."
-            }
-        }
-
-        info = strategy_descriptions[strategy]
-        embed = discord.Embed(
-            title=f"{info['emoji']} Budget Strategy: {strategy.title()}",
-            description=info['desc'],
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Playstyle", value=info['playstyle'], inline=False)
-        embed.add_field(name="Best For", value=info['best_for'], inline=False)
-        embed.add_field(name="Impact", value="This affects your team's counter-offer AI. GMs you negotiate with can also set their own strategies.", inline=False)
-        embed.set_footer(text="You can change your strategy at any time.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="ghosting_status", description="Check which teams have ghosted you on a player and why")
-    @app_commands.autocomplete(player_name=autocomplete_available_player)
-    async def ghosting_status(self, interaction: discord.Interaction, player_name: str):
-        free_agents = load_json(FREE_AGENTS_FILE)
-        player_id, player = find_player(free_agents, player_name)
-
-        if not player:
-            await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
-            return
-
-        ghostlist = load_json(GHOSTLIST_FILE)
-        player_ghosts = ghostlist.get(player_id, {})
-
-        if not player_ghosts:
-            embed = discord.Embed(
-                title=f"👻 Ghosting Status — {player['name']}",
-                description="No ghosted relationships found. All teams have equal bidding rights.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        ghosted_teams = []
-        warned_teams = []
-        for team_name, status in player_ghosts.items():
-            lowball_count = status.get("lowball_count", 0)
-            is_ghosted = status.get("ghosted", False)
-            
-            if is_ghosted:
-                ghost_time = status.get("ghosted_timestamp", "")
-                reason = status.get("ghosted_reason", "Multiple lowballs")
-                ghosted_teams.append((team_name, lowball_count, ghost_time, reason))
-            elif lowball_count >= 1:
-                warned_teams.append((team_name, lowball_count))
-
-        embed = discord.Embed(
-            title=f"👻 Ghosting Status — {player['name']}",
-            color=discord.Color.orange()
-        )
-
-        if ghosted_teams:
-            ghost_text = ""
-            for team_name, count, timestamp, reason in ghosted_teams:
-                try:
-                    dt = datetime.fromisoformat(timestamp)
-                    time_str = dt.strftime("%m/%d %H:%M")
-                except:
-                    time_str = "Recently"
-                ghost_text += f"🚫 **{team_name}** — {reason} ({count} lowballs) — *Since {time_str}*\n"
-            embed.add_field(name="⛔ Ghosted Teams (Blocked from Offers)", value=ghost_text, inline=False)
-
-        if warned_teams:
-            warn_text = "\n".join(
-                f"⚠️ **{team_name}** — {count} lowball{'s' if count > 1 else ''} on record (one more = ghosted!)"
-                for team_name, count in warned_teams
-            )
-            embed.add_field(name="⚠️ Teams on Notice", value=warn_text, inline=False)
-
-        embed.add_field(
-            name="How to Regain Rights",
-            value="Ghosted teams can use `/fa counter_apology <player> simple/heartfelt/premium` to apologize and regain offer rights.",
-            inline=False
-        )
-        embed.set_footer(text="Lowballs are defined as offers < 85% of market value.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="help", description="How to play the free agency simulation")
-    async def help_cmd(self, interaction: discord.Interaction):
-        pages = []
-
-        p1 = discord.Embed(title="⚾ BCA Free Agency — How to Play", color=discord.Color.blurple())
-        p1.description = (
-            "Welcome to the free agency simulation! You play as the General Manager (GM) of an MLB team, "
-            "competing to sign free agents with real contract negotiation logic.\n\n"
-            "**Getting started:**\n"
-            "1. Use `/fa available_teams` to see open teams\n"
-            "2. Use `/fa join <team>` to become GM\n"
-            "3. Wait for an admin to start free agency with `/fa_admin start_period`\n"
-            "4. Browse players with `/fa list` and check details with `/fa view <player>`\n"
-            "5. Submit offers with `/fa offer <player> <years> <aav>`\n"
-            "6. Negotiate and sign!"
-        )
-        p1.set_footer(text="Page 1 of 5 — Overview")
-        pages.append(p1)
-
-        p2 = discord.Embed(title="📋 GM Commands Reference", color=discord.Color.blurple())
-        p2.add_field(name="Team", value=(
-            "`/fa join <team>` — Join a team\n"
-            "`/fa leave_team` — Leave your team\n"
-            "`/fa my_team` — View your cap, record, and signings\n"
-            "`/fa roster [team]` — Full signed player list\n"
-            "`/fa available_teams` — Teams needing GMs"
-        ), inline=False)
-        p2.add_field(name="Players", value=(
-            "`/fa list [ovr_min] [position]` — Browse free agents\n"
-            "`/fa view <player>` — Full player profile\n"
-            "`/fa compare <p1> <p2>` — Side-by-side comparison\n"
-            "`/fa recommended` — AI-scored targets for your team"
-        ), inline=False)
-        p2.add_field(name="Negotiating", value=(
-            "`/fa offer <player> <years> <aav>` — Submit offer\n"
-            "`/fa counter <player> <years> <aav>` — Counter back after a player counters\n"
-            "`/fa accept_counter <player>` — Accept player's counter\n"
-            "`/fa withdraw <player>` — Pull back an offer\n"
-            "`/fa my_offers` — All your pending offers\n"
-            "`/fa negotiations` — Active negotiation threads"
-        ), inline=False)
-        p2.set_footer(text="Page 2 of 5 — GM Commands")
-        pages.append(p2)
-
-        p3 = discord.Embed(title="🎭 Player Personalities", color=discord.Color.blurple())
-        p3.description = "Each free agent has a personality that determines how they weigh your offer:"
-        personalities = [
-            ("Win-Now", "70% contention, 15% money, 15% length. Wants a winning team badly."),
-            ("Contender Seeker", "60% contention, 25% money, 15% length. Similar to Win-Now, but money matters more."),
-            ("Balanced", "35% contention, 40% money, 25% length. Well-rounded — no extreme priorities."),
-            ("Loyalist", "30% contention, 35% money, 35% length. Values long-term commitment most."),
-            ("Patient", "25% contention, 35% money, 40% length. Wants the longest deal possible."),
-            ("Hardball", "20% contention, 60% money, 20% length. Will squeeze you on money."),
-            ("Money-Focused", "10% contention, 80% money, 10% length. Almost entirely about the paycheck."),
-            ("Mercenary", "5% contention, 85% money, 10% length. Pure money. Winning doesn't matter."),
-        ]
-        for name, desc in personalities:
-            p3.add_field(name=name, value=desc, inline=False)
-        p3.set_footer(text="Page 3 of 5 — Personalities")
-        pages.append(p3)
-
-        p4 = discord.Embed(title="💰 Salary Bands & Scoring", color=discord.Color.blurple())
-        p4.add_field(name="Salary Bands (AAV per year)", value=(
-            "95+ OVR: $30M – $45M\n"
-            "90–94 OVR: $25M – $40M\n"
-            "85–89 OVR: $20M – $35M\n"
-            "80–84 OVR: $15M – $25M\n"
-            "75–79 OVR: $10M – $20M\n"
-            "70–74 OVR: $2M – $18M\n"
-            "0–69 OVR: $0 – $10M"
-        ), inline=True)
-        p4.add_field(name="How Scoring Works", value=(
-            "Each offer gets a **score** based on the player's personality weights:\n\n"
-            "• **Contention** — your win % vs their preference\n"
-            "• **Money** — your AAV vs their market value\n"
-            "• **Length** — your years vs their ideal range\n\n"
-            "Score **≥ 35%** → Auto-accept\n"
-            "Score **20–35%** → Moderate counter\n"
-            "Score **10–20%** → Aggressive counter\n"
-            "Score **< 10%** → Rejected"
-        ), inline=True)
-        p4.add_field(name="Position Scarcity Multipliers", value=(
-            "C, SS: 1.20x\nCF, SP: 1.15x\n2B, 3B: 1.10x\n"
-            "LF, RF, 1B: 1.00x\nRP: 0.95x\nDH: 0.90x"
-        ), inline=False)
-        p4.set_footer(text="Page 4 of 5 — Salary & Scoring")
-        pages.append(p4)
-
-        p5 = discord.Embed(title="📅 FA Stages & Market", color=discord.Color.blurple())
-        p5.add_field(name="Stages", value=(
-            "**Pre-Free Agency** — Setup. GMs join teams.\n"
-            "**Open Negotiations** — FA active. Full demand (1.00x multiplier).\n"
-            "**Closing Stage** — Demand drops to 0.95x.\n"
-            "**Signing Period** — Final push at 0.90x demand.\n"
-            "**Closed** — FA over."
-        ), inline=False)
-        p5.add_field(name="Useful Info", value=(
-            "• Offers expire after 48 hours if not resolved\n"
-            "• Multiple offers → player is harder to sign (score penalty)\n"
-            "• Late-stage signings benefit from reduced player demands\n"
-            "• Use `/fa status` to see current stage\n"
-            "• Use `/fa market` to see temperature & recent signings\n"
-            "• Use `/fa standings` to see all team tiers"
-        ), inline=False)
-        p5.set_footer(text="Page 5 of 5 — Stages & Tips")
-        pages.append(p5)
-
-        view = PaginatorView(pages)
-        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
-
 
 # ============= ADMIN COMMANDS =============
 
@@ -4215,7 +3538,684 @@ class FAConfigCommands(app_commands.Group):
 
 # ============= STANDALONE COMMANDS (Avoid 25-cmd group limit) =============
 
-@bot.tree.command(name="fa_rivalries", description="See the top competitive matchups (most bidding wars between teams)")
+@bot.tree.command(name="fa_wish_add", description="Add a player to your wish list (max 5)")
+@app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
+async def fa_wish_add(interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    free_agents = load_json(FREE_AGENTS_FILE)
+    player_id, player = find_player(free_agents, player_name)
+    if not player:
+        await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+        return
+
+    wishlists = load_json(WISHLIST_FILE)
+    team_list = wishlists.get(user_team, [])
+
+    if player_id in team_list:
+        await interaction.response.send_message(f"**{player['name']}** is already on your wish list.", ephemeral=True)
+        return
+
+    if len(team_list) >= 5:
+        await interaction.response.send_message("❌ Wish list is full (max 5). Remove a player first with `/fa wish_remove`.", ephemeral=True)
+        return
+
+    team_list.append(player_id)
+    wishlists[user_team] = team_list
+    save_json(WISHLIST_FILE, wishlists)
+    await interaction.response.send_message(f"✅ Added **{player['name']}** to your wish list ({len(team_list)}/5).", ephemeral=True)
+
+@bot.tree.command(name="fa_wish_remove", description="Remove a player from your wish list")
+@app_commands.autocomplete(player_name=autocomplete_any_player, team=autocomplete_team)
+async def fa_wish_remove(interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    free_agents = load_json(FREE_AGENTS_FILE)
+    player_id, player = find_player(free_agents, player_name)
+    if not player:
+        await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+        return
+
+    wishlists = load_json(WISHLIST_FILE)
+    team_list = wishlists.get(user_team, [])
+
+    if player_id not in team_list:
+        await interaction.response.send_message(f"**{player['name']}** is not on your wish list.", ephemeral=True)
+        return
+
+    team_list.remove(player_id)
+    wishlists[user_team] = team_list
+    save_json(WISHLIST_FILE, wishlists)
+    await interaction.response.send_message(f"🗑️ Removed **{player['name']}** from your wish list.", ephemeral=True)
+
+@bot.tree.command(name="fa_wish_list", description="View your wish list and each player's current status")
+@app_commands.autocomplete(team=autocomplete_team)
+async def fa_wish_list(interaction: discord.Interaction, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    wishlists = load_json(WISHLIST_FILE)
+    team_list = wishlists.get(user_team, [])
+
+    if not team_list:
+        await interaction.response.send_message("📋 Your wish list is empty. Use `/fa wish_add` to track targets.", ephemeral=True)
+        return
+
+    free_agents = load_json(FREE_AGENTS_FILE)
+    offers = load_json(OFFERS_FILE)
+    embed = discord.Embed(title=f"📋 {user_team} Wish List", color=discord.Color.blue())
+
+    for pid in team_list:
+        player = free_agents.get(pid)
+        if not player:
+            embed.add_field(name="Unknown Player", value="*(no longer in system)*", inline=False)
+            continue
+
+        status = player["status"]
+        if status == "signed":
+            val = f"✍️ Signed with **{player.get('signed_team', '?')}** — ${player.get('signed_aav', 0):,}/yr × {player.get('signed_years', 0)}yr"
+        else:
+            active_bids = sum(1 for o in offers.values() if o["player_id"] == pid and o["status"] == "pending")
+            your_bid = any(o["team"] == user_team and o["player_id"] == pid and o["status"] == "pending" for o in offers.values())
+            bid_note = f" | **{active_bids}** bid(s)" + (" ✅ *You have an offer in*" if your_bid else "")
+            val = f"🟢 Available — OVR {player['ovr']} | {player['position']} | Age {player['age']}{bid_note}"
+
+        embed.add_field(name=player["name"], value=val, inline=False)
+
+    embed.set_footer(text=f"{len(team_list)}/5 slots used")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_cap_breakdown", description="Detailed cap space breakdown for your team")
+@app_commands.autocomplete(team=autocomplete_team)
+async def fa_cap_breakdown(interaction: discord.Interaction, team: Optional[str] = None):
+    user_team, team_data, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    free_agents = load_json(FREE_AGENTS_FILE)
+    signed = sorted(
+        [p for p in free_agents.values() if p.get("signed_team") == user_team and p["status"] == "signed"],
+        key=lambda x: x.get("signed_aav", 0), reverse=True
+    )
+
+    total_aav = sum(p.get("signed_aav", 0) for p in signed)
+    total_years = sum(p.get("signed_years", 0) for p in signed)
+    remaining_cap = team_data.get("cap_space", 0)
+    original_cap = total_aav + remaining_cap
+
+    embed = discord.Embed(title=f"💰 {user_team} — Cap Breakdown", color=discord.Color.gold())
+    embed.add_field(name="Total Cap", value=f"${original_cap:,}", inline=True)
+    embed.add_field(name="Committed AAV", value=f"${total_aav:,}", inline=True)
+    embed.add_field(name="Remaining", value=f"${remaining_cap:,}", inline=True)
+    embed.add_field(name="Signings", value=str(len(signed)), inline=True)
+    embed.add_field(name="Total Years", value=str(total_years), inline=True)
+    embed.add_field(name="Avg AAV/Player", value=f"${total_aav // len(signed):,}" if signed else "$0", inline=True)
+
+    if signed:
+        player_lines = []
+        for p in signed:
+            pct = (p.get("signed_aav", 0) / total_aav * 100) if total_aav else 0
+            bar_len = int(pct / 5)
+            bar = "█" * bar_len + "░" * (20 - bar_len)
+            player_lines.append(
+                f"**{p['name']}** ({player_position_display(p)}) — ${p.get('signed_aav', 0):,}/yr × {p.get('signed_years', 0)}yr  `{pct:.1f}%`\n`{bar}`"
+            )
+        embed.add_field(name="Contracts", value="\n".join(player_lines[:8]), inline=False)
+        if len(signed) > 8:
+            embed.set_footer(text=f"Showing top 8 of {len(signed)} contracts")
+    else:
+        embed.description = "No players signed yet."
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_gauge_interest", description="Get a sense of what a player is looking for before making a formal offer")
+@app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
+async def fa_gauge_interest(interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
+    user_team, team_data, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    settings = load_json(SETTINGS_FILE)
+    if not settings.get("fa_active", False):
+        await interaction.response.send_message("❌ Free agency is not active.", ephemeral=True)
+        return
+
+    free_agents = load_json(FREE_AGENTS_FILE)
+    player_id = None
+    for pid, p in free_agents.items():
+        if p["name"].lower() == player_name.lower() and p["status"] == "available":
+            player_id = pid
+            break
+
+    if not player_id:
+        await interaction.response.send_message(f"❌ **{player_name}** is not available.", ephemeral=True)
+        return
+
+    player = free_agents[player_id]
+    personality = player["personality"]
+    weights = get_personality_weights(personality)
+    win_pct = team_data.get("win_percentage", 0.500)
+
+    priority_labels = {
+        "money": "💰 Contract AAV",
+        "length": "📅 Contract length",
+        "contention": "🏆 Winning / contention"
+    }
+    sorted_weights = sorted(weights.items(), key=lambda x: x[1], reverse=True)
+
+    priority_lines = []
+    for i, (key, val) in enumerate(sorted_weights):
+        rank = ["1st", "2nd", "3rd"][i]
+        bar = "█" * round(val * 10)
+        priority_lines.append(f"{rank} priority — {priority_labels[key]}: {bar} ({val:.0%})")
+
+    length_hint = f"{player['ideal_length_min']}–{player['ideal_length_max']} years"
+
+    contention_bonus = calculate_contention_bonus(win_pct)
+    if contention_bonus >= 0.15:
+        contention_fit = "✅ Strong fit — your team's record appeals to this player"
+    elif contention_bonus >= 0.08:
+        contention_fit = "🟡 Decent fit — your team is competitive but not elite"
+    else:
+        contention_fit = "🔴 Weak fit — this player wants a contending team, yours may not qualify"
+
+    personality_hints = {
+        "Win-Now":          "Wants to compete immediately. Ring potential matters as much as money.",
+        "Contender Seeker": "Primarily looking for a chance to win. Will accept less money for a playoff team.",
+        "Balanced":         "Looking for a fair deal across money, years, and winning potential.",
+        "Loyalist":         "Values long-term commitment above all. Offer years generously.",
+        "Patient":          "Wants security — a long deal is more important than AAV.",
+        "Hardball":         "Expects top-of-market money and will not negotiate easily.",
+        "Money-Focused":    "The AAV is everything. Get it close to market value to even get in the room.",
+        "Mercenary":        "Goes to the highest bidder, plain and simple. Competing offers drive this player.",
+    }
+
+    embed = discord.Embed(
+        title=f"🔍 Gauging Interest — {player['name']}",
+        description=f"*{personality_hints.get(personality, '')}*",
+        color=discord.Color.teal()
+    )
+    embed.add_field(name="Personality", value=personality, inline=True)
+    embed.add_field(name="Position / OVR", value=f"{player['position']} | OVR {player['overall']}", inline=True)
+    embed.add_field(name="Preferred Length", value=length_hint, inline=True)
+    embed.add_field(name="Priority Weights", value="\n".join(priority_lines), inline=False)
+    embed.add_field(name="Your Team's Contention Appeal", value=contention_fit, inline=False)
+
+    offer_count = player.get("offer_count", 0)
+    if offer_count >= 2:
+        embed.add_field(
+            name="⚡ Market Activity",
+            value=f"{offer_count} teams are already in pursuit. Expect a competitive negotiation.",
+            inline=False
+        )
+
+    embed.set_footer(text="This is informal intel — exact salary expectations are revealed during negotiation.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_save_template", description="Save a contract template for quick reuse (e.g., 4yr/$20M)")
+@app_commands.autocomplete(team=autocomplete_team)
+async def fa_save_template(interaction: discord.Interaction, template_name: str, years: int, aav: int, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    if len(template_name) > 20:
+        await interaction.response.send_message("❌ Template name must be 20 characters or less.", ephemeral=True)
+        return
+
+    save_offer_template(interaction.user.id, user_team, template_name, years, aav)
+
+    embed = discord.Embed(
+        title="💾 Template Saved",
+        description=f"Template **{template_name}** saved for {user_team}",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Terms", value=f"{years} years @ ${aav:,}/yr", inline=False)
+    embed.add_field(name="Tip", value=f"Load it later with `/fa load_template {template_name}`", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_load_template", description="Load a saved contract template and see its terms")
+@app_commands.autocomplete(team=autocomplete_team)
+async def fa_load_template(interaction: discord.Interaction, template_name: str, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    template = load_offer_template(interaction.user.id, user_team, template_name)
+    if not template:
+        await interaction.response.send_message(f"❌ Template '{template_name}' not found.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="📋 Template Details",
+        description=f"**{template_name}**",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Years", value=template["years"], inline=True)
+    embed.add_field(name="AAV", value=f"${template['aav']:,}", inline=True)
+    embed.add_field(name="Total Value", value=f"${template['aav'] * template['years']:,}", inline=True)
+    embed.add_field(name="How to Use", value=f"When making an offer: `/fa offer <player> {template['years']} {template['aav']}`", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_list_templates", description="View all your saved offer templates")
+@app_commands.autocomplete(team=autocomplete_team)
+async def fa_list_templates(interaction: discord.Interaction, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    templates = list_offer_templates(interaction.user.id, user_team)
+    if not templates:
+        await interaction.response.send_message(f"❌ You have no saved templates for {user_team}. Use `/fa save_template` to create one.", ephemeral=True)
+        return
+
+    rows = [
+        f"**{name}** — {t['years']}yr @ ${t['aav']:,}/yr (${t['aav'] * t['years']:,} total)"
+        for name, t in templates.items()
+    ]
+
+    pages = make_pages(f"📋 Templates — {user_team}", discord.Color.blue(), rows, per_page=10)
+    view = PaginatorView(pages) if len(pages) > 1 else None
+    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
+@bot.tree.command(name="fa_counter_apology", description="Apologize to a ghosted player and regain offer rights (tiers: simple, heartfelt, premium)")
+@app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
+async def fa_counter_apology(interaction: discord.Interaction, player_name: str, apology_level: str = "simple", team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    if apology_level not in ["simple", "heartfelt", "premium"]:
+        await interaction.response.send_message(
+            "❌ Apology level must be: `simple` (30% success), `heartfelt` (65% success), or `premium` (95% success)",
+            ephemeral=True
+        )
+        return
+
+    free_agents = load_json(FREE_AGENTS_FILE)
+    player_id, player = find_player(free_agents, player_name)
+
+    if not player:
+        await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+        return
+
+    if not is_team_ghosted(player_id, user_team):
+        await interaction.response.send_message(
+            f"❌ {user_team} is not ghosted by {player['name']}. You can submit offers normally.", ephemeral=True
+        )
+        return
+
+    # Check apology cooldown (can't spam apologies)
+    ghostlist = load_json(GHOSTLIST_FILE)
+    status = ghostlist.get(player_id, {}).get(user_team, {})
+    last_apology_field = f"last_apology_{apology_level}"
+    
+    if last_apology_field in status:
+        last_time = datetime.fromisoformat(status[last_apology_field])
+        cooldown_hours = {"simple": 2, "heartfelt": 6, "premium": 12}[apology_level]
+        hours_passed = (datetime.now() - last_time).total_seconds() / 3600
+        if hours_passed < cooldown_hours:
+            remaining = cooldown_hours - hours_passed
+            await interaction.response.send_message(
+                f"⏳ {user_team}, {player['name']}'s agent won't hear another apology for {int(remaining)}h. Give it time.",
+                ephemeral=True
+            )
+            return
+
+    # Success rate based on tier
+    success_rates = {"simple": 0.30, "heartfelt": 0.65, "premium": 0.95}
+    success = random.random() < success_rates[apology_level]
+
+    apology_messages = {
+        "simple": {
+            "your_message": "We made a mistake on our last offer. Let's try again.",
+            "accept": "The agent nods: 'Apology accepted. You get one more shot.'",
+            "reject": "The agent shakes their head: 'Words aren't enough. Show me the money.'"
+        },
+        "heartfelt": {
+            "your_message": "We disrespected your client with that lowball. Our organization values respect and fairness. Let's discuss what your client truly deserves.",
+            "accept": "The agent is moved: 'Alright, I see the sincerity. You're back in the bidding.'",
+            "reject": "The agent remains unmoved: 'Apologies are nice, but actions speak louder. Come back with a real offer.'"
+        },
+        "premium": {
+            "your_message": "I owe you a sincere apology on behalf of the entire organization. Your client is elite talent and deserves elite respect and compensation. We're ready to prove it.",
+            "accept": "The agent is impressed: 'That's the level of respect my client deserves. Welcome back.'",
+            "reject": "Even the agent seems surprised you failed: 'That was a hell of an apology, but my client wants to move on.'"
+        }
+    }
+
+    messages = apology_messages[apology_level]
+    cost = {"simple": 0, "heartfelt": 50000, "premium": 250000}[apology_level]
+
+    if success:
+        unghost_team(player_id, user_team)
+        record_apology_attempt(player_id, user_team, apology_level)
+        log_action("counter_apology_success", f"{user_team} successfully apologized to {player['name']} ({apology_level})")
+
+        embed = discord.Embed(
+            title="🤝 Apology Accepted!",
+            description=f"You've regained the right to submit offers to **{player['name']}**.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Your Message", value=f"*{messages['your_message']}*", inline=False)
+        embed.add_field(name="Agent Response", value=messages['accept'], inline=False)
+        if cost > 0:
+            embed.add_field(name="Apology Cost", value=f"*Gestures of goodwill: ${cost:,} cap penalty*", inline=False)
+        embed.add_field(name="Next Steps", value=f"Use `/fa offer {player['name']} <years> <aav>` to submit a serious offer.", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # Try to notify player via thread if exists
+        negotiations = load_json(NEGOTIATIONS_FILE)
+        for neg in negotiations.values():
+            if neg.get("player") == player["name"] and neg.get("team") == user_team:
+                try:
+                    thread = await interaction.client.fetch_channel(neg["thread_id"])
+                    await thread.send(f"📨 **{user_team}** has formally apologized for previous lowball offers and is back in serious negotiations!")
+                except Exception:
+                    pass
+                break
+    else:
+        record_apology_attempt(player_id, user_team, apology_level)
+        log_action("counter_apology_failed", f"{user_team}'s apology to {player['name']} was rejected ({apology_level})")
+
+        embed = discord.Embed(
+            title="😔 Apology Declined",
+            description=f"Your apology was not accepted by {player['name']}'s agent.",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="Your Message", value=f"*{messages['your_message']}*", inline=False)
+        embed.add_field(name="Agent Response", value=messages['reject'], inline=False)
+        embed.add_field(name="Try Again", value=f"You can attempt another apology in a few hours. Consider escalating to a {['heartfelt', 'premium', 'premium'][['simple', 'heartfelt', 'premium'].index(apology_level)]} apology next time.", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_offer_history", description="View full history of all offers in negotiation")
+@app_commands.autocomplete(player_name=autocomplete_available_player, team=autocomplete_team)
+async def fa_offer_history(interaction: discord.Interaction, player_name: str, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    free_agents = load_json(FREE_AGENTS_FILE)
+    player_id, player = find_player(free_agents, player_name)
+
+    if not player:
+        await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+        return
+
+    offers = load_json(OFFERS_FILE)
+    player_offers = [o for o in offers.values() if o["player_id"] == player_id]
+
+    if not player_offers:
+        await interaction.response.send_message(f"❌ No offers for {player['name']}.", ephemeral=True)
+        return
+
+    # Sort by timestamp ascending (oldest first)
+    player_offers.sort(key=lambda o: o.get("timestamp", ""), reverse=False)
+
+    rows = []
+    for i, o in enumerate(player_offers, 1):
+        ts = o.get("timestamp", "?")
+        try:
+            dt = datetime.fromisoformat(ts)
+            time_str = dt.strftime("%m/%d %H:%M")
+        except:
+            time_str = ts[:16]
+
+        status_icon = "✅" if o["status"] == "accepted" else "❌" if o["status"] == "rejected" else "⏳"
+        counter_count = len(o.get("counter_offers", []))
+        counter_badge = f" [{counter_count} counters]" if counter_count > 0 else ""
+        
+        rows.append(
+            f"{i}. **{o['team']}** {status_icon} — {o['years']}yr @ ${o['aav']:,}/yr | {time_str}{counter_badge}"
+        )
+
+    pages = make_pages(f"📜 Offer History — {player['name']}", discord.Color.orange(), rows, per_page=15)
+    view = PaginatorView(pages) if len(pages) > 1 else None
+    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
+@bot.tree.command(name="fa_budget_strategy", description="Set your team's negotiation strategy: spender, balanced, or saver")
+@app_commands.autocomplete(team=autocomplete_team)
+async def fa_budget_strategy(interaction: discord.Interaction, strategy: str, team: Optional[str] = None):
+    user_team, _, err = resolve_gm_team(interaction.user.id, team)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    if strategy not in ["spender", "balanced", "saver"]:
+        await interaction.response.send_message(
+            "❌ Strategy must be one of: `spender`, `balanced`, or `saver`",
+            ephemeral=True
+        )
+        return
+
+    set_budget_strategy(interaction.user.id, user_team, strategy)
+    log_action("budget_strategy_set", f"{user_team} set strategy to {strategy}")
+
+    strategy_descriptions = {
+        "spender": {
+            "emoji": "💸",
+            "desc": "Counter aggressively even on weak offers (≥15% score). Build a bidding war.",
+            "playstyle": "High-risk, high-reward. You'll counter a lot but might overpay.",
+            "best_for": "Teams willing to spend big and drive up prices."
+        },
+        "balanced": {
+            "emoji": "⚖️",
+            "desc": "Counter strategically on moderate offers (≥25% score). Balance risk/reward.",
+            "playstyle": "Default approach. Counter quality opportunities without overextending.",
+            "best_for": "Teams looking for value deals with reasonable counteroffering."
+        },
+        "saver": {
+            "emoji": "🏦",
+            "desc": "Only counter on strong offers (≥35% score). Preserve cap space.",
+            "playstyle": "Conservative. You'll make fewer offers but stay cap-friendly.",
+            "best_for": "Teams building slowly with patient, selective signings."
+        }
+    }
+
+    info = strategy_descriptions[strategy]
+    embed = discord.Embed(
+        title=f"{info['emoji']} Budget Strategy: {strategy.title()}",
+        description=info['desc'],
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Playstyle", value=info['playstyle'], inline=False)
+    embed.add_field(name="Best For", value=info['best_for'], inline=False)
+    embed.add_field(name="Impact", value="This affects your team's counter-offer AI. GMs you negotiate with can also set their own strategies.", inline=False)
+    embed.set_footer(text="You can change your strategy at any time.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_ghosting_status", description="Check which teams have ghosted you on a player and why")
+@app_commands.autocomplete(player_name=autocomplete_available_player)
+async def fa_ghosting_status(interaction: discord.Interaction, player_name: str):
+    free_agents = load_json(FREE_AGENTS_FILE)
+    player_id, player = find_player(free_agents, player_name)
+
+    if not player:
+        await interaction.response.send_message(f"❌ Player '{player_name}' not found.", ephemeral=True)
+        return
+
+    ghostlist = load_json(GHOSTLIST_FILE)
+    player_ghosts = ghostlist.get(player_id, {})
+
+    if not player_ghosts:
+        embed = discord.Embed(
+            title=f"👻 Ghosting Status — {player['name']}",
+            description="No ghosted relationships found. All teams have equal bidding rights.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    ghosted_teams = []
+    warned_teams = []
+    for team_name, status in player_ghosts.items():
+        lowball_count = status.get("lowball_count", 0)
+        is_ghosted = status.get("ghosted", False)
+        
+        if is_ghosted:
+            ghost_time = status.get("ghosted_timestamp", "")
+            reason = status.get("ghosted_reason", "Multiple lowballs")
+            ghosted_teams.append((team_name, lowball_count, ghost_time, reason))
+        elif lowball_count >= 1:
+            warned_teams.append((team_name, lowball_count))
+
+    embed = discord.Embed(
+        title=f"👻 Ghosting Status — {player['name']}",
+        color=discord.Color.orange()
+    )
+
+    if ghosted_teams:
+        ghost_text = ""
+        for team_name, count, timestamp, reason in ghosted_teams:
+            try:
+                dt = datetime.fromisoformat(timestamp)
+                time_str = dt.strftime("%m/%d %H:%M")
+            except:
+                time_str = "Recently"
+            ghost_text += f"🚫 **{team_name}** — {reason} ({count} lowballs) — *Since {time_str}*\n"
+        embed.add_field(name="⛔ Ghosted Teams (Blocked from Offers)", value=ghost_text, inline=False)
+
+    if warned_teams:
+        warn_text = "\n".join(
+            f"⚠️ **{team_name}** — {count} lowball{'s' if count > 1 else ''} on record (one more = ghosted!)"
+            for team_name, count in warned_teams
+        )
+        embed.add_field(name="⚠️ Teams on Notice", value=warn_text, inline=False)
+
+    embed.add_field(
+        name="How to Regain Rights",
+        value="Ghosted teams can use `/fa counter_apology <player> simple/heartfelt/premium` to apologize and regain offer rights.",
+        inline=False
+    )
+    embed.set_footer(text="Lowballs are defined as offers < 85% of market value.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="fa_help", description="How to play the free agency simulation")
+async def fa_help(interaction: discord.Interaction):
+    pages = []
+
+    p1 = discord.Embed(title="⚾ BCA Free Agency — How to Play", color=discord.Color.blurple())
+    p1.description = (
+        "Welcome to the free agency simulation! You play as the General Manager (GM) of an MLB team, "
+        "competing to sign free agents with real contract negotiation logic.\n\n"
+        "**Getting started:**\n"
+        "1. Use `/fa available_teams` to see open teams\n"
+        "2. Use `/fa join <team>` to become GM\n"
+        "3. Wait for an admin to start free agency with `/fa_admin start_period`\n"
+        "4. Browse players with `/fa list` and check details with `/fa view <player>`\n"
+        "5. Submit offers with `/fa offer <player> <years> <aav>`\n"
+        "6. Negotiate and sign!"
+    )
+    p1.set_footer(text="Page 1 of 5 — Overview")
+    pages.append(p1)
+
+    p2 = discord.Embed(title="📋 GM Commands Reference", color=discord.Color.blurple())
+    p2.add_field(name="Team", value=(
+        "`/fa join <team>` — Join a team\n"
+        "`/fa leave_team` — Leave your team\n"
+        "`/fa my_team` — View your cap, record, and signings\n"
+        "`/fa roster [team]` — Full signed player list\n"
+        "`/fa available_teams` — Teams needing GMs"
+    ), inline=False)
+    p2.add_field(name="Players", value=(
+        "`/fa list [ovr_min] [position]` — Browse free agents\n"
+        "`/fa view <player>` — Full player profile\n"
+        "`/fa compare <p1> <p2>` — Side-by-side comparison\n"
+        "`/fa recommended` — AI-scored targets for your team"
+    ), inline=False)
+    p2.add_field(name="Negotiating", value=(
+        "`/fa offer <player> <years> <aav>` — Submit offer\n"
+        "`/fa counter <player> <years> <aav>` — Counter back after a player counters\n"
+        "`/fa accept_counter <player>` — Accept player's counter\n"
+        "`/fa withdraw <player>` — Pull back an offer\n"
+        "`/fa my_offers` — All your pending offers\n"
+        "`/fa negotiations` — Active negotiation threads"
+    ), inline=False)
+    p2.set_footer(text="Page 2 of 5 — GM Commands")
+    pages.append(p2)
+
+    p3 = discord.Embed(title="🎭 Player Personalities", color=discord.Color.blurple())
+    p3.description = "Each free agent has a personality that determines how they weigh your offer:"
+    personalities = [
+        ("Win-Now", "70% contention, 15% money, 15% length. Wants a winning team badly."),
+        ("Contender Seeker", "60% contention, 25% money, 15% length. Similar to Win-Now, but money matters more."),
+        ("Balanced", "35% contention, 40% money, 25% length. Well-rounded — no extreme priorities."),
+        ("Loyalist", "30% contention, 35% money, 35% length. Values long-term commitment most."),
+        ("Patient", "25% contention, 35% money, 40% length. Wants the longest deal possible."),
+        ("Hardball", "20% contention, 60% money, 20% length. Will squeeze you on money."),
+        ("Money-Focused", "10% contention, 80% money, 10% length. Almost entirely about the paycheck."),
+        ("Mercenary", "5% contention, 85% money, 10% length. Pure money. Winning doesn't matter."),
+    ]
+    for name, desc in personalities:
+        p3.add_field(name=name, value=desc, inline=False)
+    p3.set_footer(text="Page 3 of 5 — Personalities")
+    pages.append(p3)
+
+    p4 = discord.Embed(title="💰 Salary Bands & Scoring", color=discord.Color.blurple())
+    p4.add_field(name="Salary Bands (AAV per year)", value=(
+        "95+ OVR: $30M – $45M\n"
+        "90–94 OVR: $25M – $40M\n"
+        "85–89 OVR: $20M – $35M\n"
+        "80–84 OVR: $15M – $25M\n"
+        "75–79 OVR: $10M – $20M\n"
+        "70–74 OVR: $2M – $18M\n"
+        "0–69 OVR: $0 – $10M"
+    ), inline=True)
+    p4.add_field(name="How Scoring Works", value=(
+        "Each offer gets a **score** based on the player's personality weights:\n\n"
+        "• **Contention** — your win % vs their preference\n"
+        "• **Money** — your AAV vs their market value\n"
+        "• **Length** — your years vs their ideal range\n\n"
+        "Score **≥ 35%** → Auto-accept\n"
+        "Score **20–35%** → Moderate counter\n"
+        "Score **10–20%** → Aggressive counter\n"
+        "Score **< 10%** → Rejected"
+    ), inline=True)
+    p4.add_field(name="Position Scarcity Multipliers", value=(
+        "C, SS: 1.20x\nCF, SP: 1.15x\n2B, 3B: 1.10x\n"
+        "LF, RF, 1B: 1.00x\nRP: 0.95x\nDH: 0.90x"
+    ), inline=False)
+    p4.set_footer(text="Page 4 of 5 — Salary & Scoring")
+    pages.append(p4)
+
+    p5 = discord.Embed(title="📅 FA Stages & Market", color=discord.Color.blurple())
+    p5.add_field(name="Stages", value=(
+        "**Pre-Free Agency** — Setup. GMs join teams.\n"
+        "**Open Negotiations** — FA active. Full demand (1.00x multiplier).\n"
+        "**Closing Stage** — Demand drops to 0.95x.\n"
+        "**Signing Period** — Final push at 0.90x demand.\n"
+        "**Closed** — FA over."
+    ), inline=False)
+    p5.add_field(name="Useful Info", value=(
+        "• Offers expire after 48 hours if not resolved\n"
+        "• Multiple offers → player is harder to sign (score penalty)\n"
+        "• Late-stage signings benefit from reduced player demands\n"
+        "• Use `/fa status` to see current stage\n"
+        "• Use `/fa market` to see temperature & recent signings\n"
+        "• Use `/fa standings` to see all team tiers"
+    ), inline=False)
+    p5.set_footer(text="Page 5 of 5 — Stages & Tips")
+    pages.append(p5)
+
+    view = PaginatorView(pages)
+    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
+
 async def fa_rivalries(interaction: discord.Interaction):
     rivalries = get_top_rivalries(limit=10)
     
